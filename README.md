@@ -1,6 +1,6 @@
 # open-mailtrack
 
-Self-hosted open tracking for mail you send from Gmail. Three parts:
+Self-hosted open tracking for Gmail. Three parts:
 
 - **server**: records tracking pixel hits and tells the extension which messages were opened. Node, SQLite, one Docker container.
 - **extension**: Chrome extension for Gmail. Adds the pixel to mail you send, shows `✓` / `✓✓ N` in your Sent list and on your messages, and keeps your own views from counting as opens.
@@ -114,4 +114,5 @@ pnpm --filter @open-mailtrack/extension dev         # rebuilds dist on change
 
 Recipients are not told they are being tracked. Some jurisdictions treat this as requiring consent; that is your call as the operator.
 
-MIT.
+## License
+MIT license
