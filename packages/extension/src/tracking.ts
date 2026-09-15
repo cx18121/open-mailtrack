@@ -20,6 +20,14 @@ export function createPixel(doc: Document, serverUrl: string, id: string) {
   return img;
 }
 
+/** Removes our pixels, including ones quoted from earlier messages via Gmail's image proxy. */
+export function removePixels(root: ParentNode, serverUrl: string) {
+  const marker = `${new URL(serverUrl).hostname}/p/`;
+  root.querySelectorAll("img").forEach((img) => {
+    if (img.hasAttribute(PIXEL_ATTR) || img.getAttribute("src")?.includes(marker)) img.remove();
+  });
+}
+
 /** Chrome blocks the pixel from loading inside Gmail itself so composing never counts as an open. */
 export function pixelBlockRule(serverUrl: string): chrome.declarativeNetRequest.Rule {
   const host = new URL(serverUrl).hostname;

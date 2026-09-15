@@ -10,12 +10,15 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@inboxsdk/core": "^2.2.24"
+    "@inboxsdk/core": "^2.2.24",
+    "kefir": "3.8.8"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.9",
+    "@types/kefir": "3.8.11",
     "@types/node": "^26.6.0",
     "esbuild": "^0.28.2",
+    "jsdom": "^30.0.1",
     "tsx": "^4.23.13",
     "vitest": "^5.0.1"
   }
