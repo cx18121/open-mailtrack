@@ -30,7 +30,7 @@ describe("summarize", () => {
       { at: 1789501353180, kind: "open", reason: "" },
       { at: 1789501524320, kind: "open", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 3, firstOpenAt: 1789500109100, lastOpenAt: 1789501524320 });
+    expect(s).toEqual({ opens: 3, firstOpenAt: 1789500109100, lastOpenAt: 1789501524320, openAts: [1789500109100, 1789501353180, 1789501524320] });
   });
 
   it("collapses double fetches within 10 seconds and ignores self views", () => {
@@ -39,10 +39,10 @@ describe("summarize", () => {
       { at: 1800, kind: "open", reason: "" },
       { at: 50_000, kind: "self_view", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 1, firstOpenAt: 1000, lastOpenAt: 1000 });
+    expect(s).toEqual({ opens: 1, firstOpenAt: 1000, lastOpenAt: 1000, openAts: [1000] });
   });
 
   it("is empty with no opens", () => {
-    expect(summarize([])).toEqual({ opens: 0, firstOpenAt: null, lastOpenAt: null });
+    expect(summarize([])).toEqual({ opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [] });
   });
 });

@@ -1,7 +1,7 @@
 import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
 import { createApi, createStatusBatcher } from "./api.js";
-import { icon, label } from "./marks.js";
+import { rowImage, statusElement } from "./marks.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 
@@ -73,13 +73,15 @@ async function main() {
     const messageId = await message.getMessageIDAsync();
     api.view(messageId).catch((err) => log(err));
     const summary = await status.message(messageId);
-    if (summary) message.addAttachmentIcon(icon(summary));
+    if (!summary) return;
+    const body = message.getBodyElement();
+    body.parentElement?.insertBefore(statusElement(body.ownerDocument, summary), body);
   });
 
   sdk.Lists.registerThreadRowViewHandler(async (row) => {
     const threadId = await row.getThreadIDAsync();
     const summary = await status.thread(threadId);
-    if (summary) row.addLabel(label(summary));
+    if (summary) row.addImage(rowImage(summary));
   });
 }
 

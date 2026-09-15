@@ -93,13 +93,12 @@ export function createApp(db: Db, config: Config) {
     const threadIds = split(c.req.query("threadIds"));
     const messages: Record<string, ReturnType<typeof summarize>> = {};
     for (const m of db.findByGmailMessageIds(messageIds)) messages[m.gmail_message_id!] = summarize(classified(m));
-    const threads: Record<string, ReturnType<typeof summarize> & { tracked: number }> = {};
+    const threads: Record<string, { tracked: number; opens: number; lastOpenAt: number | null }> = {};
     for (const m of db.findByGmailThreadIds(threadIds)) {
       const s = summarize(classified(m));
-      const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, firstOpenAt: null, lastOpenAt: null });
+      const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, lastOpenAt: null });
       t.tracked++;
       t.opens += s.opens;
-      if (s.firstOpenAt && (!t.firstOpenAt || s.firstOpenAt < t.firstOpenAt)) t.firstOpenAt = s.firstOpenAt;
       if (s.lastOpenAt && (!t.lastOpenAt || s.lastOpenAt > t.lastOpenAt)) t.lastOpenAt = s.lastOpenAt;
     }
     return c.json({ messages, threads, classifierVersion: CLASSIFIER_VERSION });

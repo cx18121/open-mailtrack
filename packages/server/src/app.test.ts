@@ -80,7 +80,7 @@ describe("pixel", () => {
     expect(detail.opens).toBe(0);
 
     const status = await (await app.request("/api/status?messageIds=gm1,unknown&threadIds=gt1", { headers: auth })).json();
-    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null } });
+    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [] } });
     expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 0 });
   });
 

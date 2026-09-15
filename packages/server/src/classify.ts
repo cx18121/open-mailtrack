@@ -19,12 +19,12 @@ export function classifyHit(hit: { at: number; user_agent: string | null }, self
   return { at: hit.at, kind: "open", reason: "no exclusion matched" };
 }
 
-export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null };
+export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[] };
 
 export function summarize(hits: ClassifiedHit[]): OpenSummary {
   const opens: number[] = [];
   for (const h of hits.filter((h) => h.kind === "open").sort((a, b) => a.at - b.at)) {
     if (opens.length === 0 || h.at - opens[opens.length - 1] > DEDUPE_MS) opens.push(h.at);
   }
-  return { opens: opens.length, firstOpenAt: opens[0] ?? null, lastOpenAt: opens.at(-1) ?? null };
+  return { opens: opens.length, firstOpenAt: opens[0] ?? null, lastOpenAt: opens.at(-1) ?? null, openAts: opens };
 }

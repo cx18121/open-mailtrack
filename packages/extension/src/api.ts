@@ -1,8 +1,8 @@
 import type { Settings } from "./settings.js";
 
 export type Registration = { id: string; sender: string; recipients: string[]; subject: string };
-export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null };
-export type ThreadSummary = OpenSummary & { tracked: number };
+export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[] };
+export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null };
 export type Status = { messages: Record<string, OpenSummary>; threads: Record<string, ThreadSummary> };
 
 export function createApi(settings: Settings) {

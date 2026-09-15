@@ -1,0 +1,48 @@
+.omt-status {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 0 0 12px;
+  font-size: 12px;
+  line-height: 16px;
+  color: #5f6368;
+}
+.omt-status-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.omt-status-line img {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+.omt-status-opened .omt-status-text {
+  color: #188038;
+}
+.omt-status-details {
+  margin-left: auto;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  color: #5f6368;
+  cursor: pointer;
+}
+.omt-status-details:hover {
+  color: #202124;
+  text-decoration: underline;
+}
+.omt-status-list {
+  margin: 0 0 0 24px;
+  padding: 0;
+  list-style: none;
+  font-variant-numeric: tabular-nums;
+}
+.omt-status-list li {
+  display: flex;
+  gap: 12px;
+}
+.omt-status-list time {
+  min-width: 64px;
+}
