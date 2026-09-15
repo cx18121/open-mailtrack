@@ -79,6 +79,7 @@ async function main() {
   });
 
   sdk.Lists.registerThreadRowViewHandler((row) => {
+    if (row.destroyed) return;
     const image = row
       .getThreadIDAsync()
       .then((threadId: string) => status.thread(threadId))
