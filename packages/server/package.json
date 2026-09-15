@@ -1,0 +1,22 @@
+{
+  "name": "@open-mailtrack/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch --no-warnings=ExperimentalWarning src/index.ts",
+    "start": "node --no-warnings=ExperimentalWarning dist/index.js",
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.1.1",
+    "hono": "^4.13.8"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.0",
+    "tsx": "^4.23.13",
+    "vitest": "^5.0.1"
+  }
+}
