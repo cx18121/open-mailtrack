@@ -80,7 +80,7 @@ describe("pixel", () => {
     expect(detail.opens).toBe(0);
 
     const status = await (await app.request("/api/status?messageIds=gm1,unknown&threadIds=gt1", { headers: auth })).json();
-    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [] } });
+    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null } });
     expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 0 });
   });
 
@@ -112,6 +112,23 @@ describe("pixel", () => {
     const detail = await (await app.request(`/api/messages/${id}`, { headers: auth })).json();
     expect(detail).toMatchObject({ gmail_message_id: "gm1", gmail_thread_id: "gt1" });
     expect(detail.sent_at).toBeTypeOf("number");
+  });
+
+  it("lists messages most recently opened first, then unopened by send time", async () => {
+    const app = setup();
+    const create = async (subject: string) =>
+      (await (await app.request("/api/messages", { method: "POST", headers: auth, body: JSON.stringify({ sender: "me@x.com", recipients: ["a@y.com"], subject }) })).json()).id;
+    const a = await create("a");
+    const b = await create("b");
+    const c = await create("c");
+    await app.request(`/p/${a}.gif`);
+    await new Promise((r) => setTimeout(r, 5));
+    await app.request(`/p/${c}.gif`);
+    const list = await (await app.request("/api/messages", { headers: auth })).json();
+    expect(list.total).toBe(3);
+    expect(list.messages.map((m: { subject: string }) => m.subject)).toEqual(["c", "a", "b"]);
+    const page = await (await app.request("/api/messages?offset=1&limit=1", { headers: auth })).json();
+    expect(page.messages.map((m: { subject: string }) => m.subject)).toEqual(["a"]);
   });
 
   it("rejects api calls without the key", async () => {

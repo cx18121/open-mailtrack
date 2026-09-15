@@ -19,12 +19,27 @@ export function classifyHit(hit: { at: number; user_agent: string | null }, self
   return { at: hit.at, kind: "open", reason: "no exclusion matched" };
 }
 
-export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[] };
+export type OpenSummary = {
+  opens: number;
+  firstOpenAt: number | null;
+  lastOpenAt: number | null;
+  openAts: number[];
+  /** Set when the latest open came long after sending or long after the previous open. */
+  late: { kind: "after_send" | "after_previous"; days: number } | null;
+};
 
-export function summarize(hits: ClassifiedHit[]): OpenSummary {
+const LATE_MS = 2 * 24 * 3_600_000;
+
+export function summarize(hits: ClassifiedHit[], sentAt: number | null = null): OpenSummary {
   const opens: number[] = [];
   for (const h of hits.filter((h) => h.kind === "open").sort((a, b) => a.at - b.at)) {
     if (opens.length === 0 || h.at - opens[opens.length - 1] > DEDUPE_MS) opens.push(h.at);
   }
-  return { opens: opens.length, firstOpenAt: opens[0] ?? null, lastOpenAt: opens.at(-1) ?? null, openAts: opens };
+  const last = opens.at(-1) ?? null;
+  const previous = opens.at(-2) ?? null;
+  const days = (ms: number) => Math.round(ms / 86_400_000);
+  let late: OpenSummary["late"] = null;
+  if (last !== null && previous !== null && last - previous >= LATE_MS) late = { kind: "after_previous", days: days(last - previous) };
+  else if (last !== null && previous === null && sentAt !== null && last - sentAt >= LATE_MS) late = { kind: "after_send", days: days(last - sentAt) };
+  return { opens: opens.length, firstOpenAt: opens[0] ?? null, lastOpenAt: last, openAts: opens, late };
 }

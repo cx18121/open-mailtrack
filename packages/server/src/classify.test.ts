@@ -30,7 +30,7 @@ describe("summarize", () => {
       { at: 1789501353180, kind: "open", reason: "" },
       { at: 1789501524320, kind: "open", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 3, firstOpenAt: 1789500109100, lastOpenAt: 1789501524320, openAts: [1789500109100, 1789501353180, 1789501524320] });
+    expect(s).toEqual({ opens: 3, firstOpenAt: 1789500109100, lastOpenAt: 1789501524320, openAts: [1789500109100, 1789501353180, 1789501524320], late: null });
   });
 
   it("collapses double fetches within 10 seconds and ignores self views", () => {
@@ -39,10 +39,19 @@ describe("summarize", () => {
       { at: 1800, kind: "open", reason: "" },
       { at: 50_000, kind: "self_view", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 1, firstOpenAt: 1000, lastOpenAt: 1000, openAts: [1000] });
+    expect(s).toEqual({ opens: 1, firstOpenAt: 1000, lastOpenAt: 1000, openAts: [1000], late: null });
   });
 
   it("is empty with no opens", () => {
-    expect(summarize([])).toEqual({ opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [] });
+    expect(summarize([])).toEqual({ opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null });
+  });
+
+  it("flags a first open long after sending and a reopen long after the previous open", () => {
+    const day = 86_400_000;
+    const open = (at: number) => ({ at, kind: "open" as const, reason: "" });
+    expect(summarize([open(6 * day)], 0).late).toEqual({ kind: "after_send", days: 6 });
+    expect(summarize([open(3600_000)], 0).late).toBeNull();
+    expect(summarize([open(1 * day), open(10 * day)], 0).late).toEqual({ kind: "after_previous", days: 9 });
+    expect(summarize([open(1 * day), open(1 * day + 3600_000)], 0).late).toBeNull();
   });
 });

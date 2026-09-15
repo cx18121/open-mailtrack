@@ -18,6 +18,7 @@ export function createApp(db: Db, config: Config) {
     const views = m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
     return db.listHits(m.id).map((h) => classifyHit(h, views));
   };
+  const summaryOf = (m: Message) => summarize(classified(m), m.sent_at);
 
   app.get("/p/:file", (c) => {
     const id = c.req.param("file").replace(/\.gif$/, "");
@@ -92,10 +93,10 @@ export function createApp(db: Db, config: Config) {
     const messageIds = split(c.req.query("messageIds"));
     const threadIds = split(c.req.query("threadIds"));
     const messages: Record<string, ReturnType<typeof summarize>> = {};
-    for (const m of db.findByGmailMessageIds(messageIds)) messages[m.gmail_message_id!] = summarize(classified(m));
+    for (const m of db.findByGmailMessageIds(messageIds)) messages[m.gmail_message_id!] = summaryOf(m);
     const threads: Record<string, { tracked: number; opens: number; lastOpenAt: number | null }> = {};
     for (const m of db.findByGmailThreadIds(threadIds)) {
-      const s = summarize(classified(m));
+      const s = summaryOf(m);
       const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, lastOpenAt: null });
       t.tracked++;
       t.opens += s.opens;
@@ -104,8 +105,20 @@ export function createApp(db: Db, config: Config) {
     return c.json({ messages, threads, classifierVersion: CLASSIFIER_VERSION });
   });
 
+  /**
+   * Tracked messages with their open summary, most recently opened first, then unopened by send time.
+   * `since` limits to messages sent or opened after that time. `offset`/`limit` page the result.
+   */
   api.get("/messages", (c) => {
-    return c.json(db.listMessages().map((m) => ({ ...m, ...summarize(classified(m)), hits: db.listHits(m.id).length })));
+    const since = Number(c.req.query("since") ?? 0);
+    const offset = Number(c.req.query("offset") ?? 0);
+    const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
+    const all = db
+      .listMessages()
+      .map((m) => ({ ...m, ...summaryOf(m), hits: db.listHits(m.id).length }))
+      .filter((m) => (m.sent_at ?? m.created_at) >= since || (m.lastOpenAt ?? 0) >= since)
+      .sort((a, b) => (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0) || (b.sent_at ?? b.created_at) - (a.sent_at ?? a.created_at));
+    return c.json({ total: all.length, messages: all.slice(offset, offset + limit) });
   });
 
   api.get("/messages/:id", (c) => {
@@ -114,7 +127,7 @@ export function createApp(db: Db, config: Config) {
     const hits = classified(message);
     return c.json({
       ...message,
-      ...summarize(hits),
+      ...summarize(hits, message.sent_at),
       hits: db.listHits(message.id).map((h, i) => ({ ...h, kind: hits[i].kind, reason: hits[i].reason })),
       views: message.gmail_message_id ? db.listViews(message.gmail_message_id) : [],
     });
