@@ -22,7 +22,7 @@ export function createPixel(doc: Document, serverUrl: string, id: string) {
 
 /** Chrome blocks the pixel from loading inside Gmail itself so composing never counts as an open. */
 export function pixelBlockRule(serverUrl: string): chrome.declarativeNetRequest.Rule {
-  const host = new URL(serverUrl).host;
+  const host = new URL(serverUrl).hostname;
   return {
     id: 1,
     priority: 1,
