@@ -3,7 +3,7 @@ import { createApi } from "./api.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, newId, PIXEL_ATTR } from "./tracking.js";
 
-const APP_ID = "open-mailtrack";
+const APP_ID = "sdk_openmt_62266805c2";
 const log = (...args: unknown[]) => console.log("[open-mailtrack]", ...args);
 
 async function main() {
