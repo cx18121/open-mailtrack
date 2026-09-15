@@ -1,10 +1,7 @@
 .omt-status {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  margin: 0 0 12px;
+  margin: 2px 0 14px;
   font-size: 12px;
-  line-height: 16px;
+  line-height: 20px;
   color: #5f6368;
 }
 .omt-status-line {
@@ -17,24 +14,29 @@
   height: 16px;
   flex: none;
 }
-.omt-status-opened .omt-status-text {
-  color: #188038;
+.omt-status-count {
+  color: #1f1f1f;
 }
-.omt-status-details {
-  margin-left: auto;
-  background: none;
+.omt-status-toggle {
+  margin-left: 4px;
+  padding: 0 4px;
   border: 0;
-  padding: 0;
+  border-radius: 4px;
+  background: none;
   font: inherit;
   color: #5f6368;
   cursor: pointer;
 }
-.omt-status-details:hover {
-  color: #202124;
-  text-decoration: underline;
+.omt-status-toggle:hover {
+  color: #1f1f1f;
+  background: rgba(60, 64, 67, 0.08);
+}
+.omt-status-toggle:focus-visible {
+  outline: 2px solid #0b57d0;
+  outline-offset: 1px;
 }
 .omt-status-list {
-  margin: 0 0 0 24px;
+  margin: 2px 0 0 26px;
   padding: 0;
   list-style: none;
   font-variant-numeric: tabular-nums;
@@ -44,5 +46,6 @@
   gap: 12px;
 }
 .omt-status-list time {
-  min-width: 64px;
+  min-width: 60px;
+  color: #1f1f1f;
 }

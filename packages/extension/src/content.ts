@@ -1,6 +1,6 @@
 import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
-import { createApi, createStatusBatcher } from "./api.js";
+import { createApi, createStatusBatcher, type ThreadSummary } from "./api.js";
 import { rowImage, statusElement } from "./marks.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
@@ -78,10 +78,12 @@ async function main() {
     body.parentElement?.insertBefore(statusElement(body.ownerDocument, summary), body);
   });
 
-  sdk.Lists.registerThreadRowViewHandler(async (row) => {
-    const threadId = await row.getThreadIDAsync();
-    const summary = await status.thread(threadId);
-    if (summary) row.addImage(rowImage(summary));
+  sdk.Lists.registerThreadRowViewHandler((row) => {
+    const image = row
+      .getThreadIDAsync()
+      .then((threadId: string) => status.thread(threadId))
+      .then((summary: ThreadSummary | undefined) => (summary ? rowImage(summary) : null));
+    row.addImage(Kefir.fromPromise(image));
   });
 }
 
