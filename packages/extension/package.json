@@ -1,0 +1,22 @@
+{
+  "name": "@open-mailtrack/extension",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "tsx build.ts",
+    "dev": "tsx build.ts --watch",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@inboxsdk/core": "^2.2.24"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.2.9",
+    "@types/node": "^26.6.0",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.13",
+    "vitest": "^5.0.1"
+  }
+}

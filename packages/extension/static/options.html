@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>open-mailtrack options</title>
+    <style>
+      body { font: 13px system-ui, sans-serif; margin: 16px; width: 360px; }
+      label { display: block; margin: 12px 0 4px; }
+      input { width: 100%; box-sizing: border-box; padding: 6px; }
+      button { margin-top: 16px; padding: 6px 14px; }
+      #status { margin-left: 8px; color: #2e7d32; }
+    </style>
+  </head>
+  <body>
+    <label>Server URL <input id="serverUrl" placeholder="https://t.example.com" /></label>
+    <label>API key <input id="apiKey" type="password" /></label>
+    <button id="save">Save</button><span id="status"></span>
+    <script src="options.js"></script>
+  </body>
+</html>
