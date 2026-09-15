@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import { classifyHit, summarize, CLASSIFIER_VERSION } from "./classify.js";
+import { classifyHit, summarize, CLASSIFIER_VERSION, type OpenSummary } from "./classify.js";
 import type { Db, Message } from "./db.js";
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
@@ -94,13 +94,16 @@ export function createApp(db: Db, config: Config) {
     const threadIds = split(c.req.query("threadIds"));
     const messages: Record<string, ReturnType<typeof summarize>> = {};
     for (const m of db.findByGmailMessageIds(messageIds)) messages[m.gmail_message_id!] = summaryOf(m);
-    const threads: Record<string, { tracked: number; opens: number; lastOpenAt: number | null }> = {};
+    const threads: Record<string, { tracked: number; opens: number; lastOpenAt: number | null; late: OpenSummary["late"] }> = {};
     for (const m of db.findByGmailThreadIds(threadIds)) {
       const s = summaryOf(m);
-      const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, lastOpenAt: null });
+      const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, lastOpenAt: null, late: null });
       t.tracked++;
       t.opens += s.opens;
-      if (s.lastOpenAt && (!t.lastOpenAt || s.lastOpenAt > t.lastOpenAt)) t.lastOpenAt = s.lastOpenAt;
+      if (s.lastOpenAt && (!t.lastOpenAt || s.lastOpenAt > t.lastOpenAt)) {
+        t.lastOpenAt = s.lastOpenAt;
+        t.late = s.late;
+      }
     }
     return c.json({ messages, threads, classifierVersion: CLASSIFIER_VERSION });
   });

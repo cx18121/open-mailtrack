@@ -6,16 +6,23 @@ const iconUrl = (opened: boolean) => chrome.runtime.getURL(opened ? "icons/opene
 /** Mirrors Gmail's own header pattern: "3:05 PM (1 hour ago)". */
 const stamp = (t: number, now: number) => `${when(t, now)} (${ago(t, now)})`;
 
-export function summaryText(s: OpenSummary, now = Date.now()): { count: string; rest: string } {
-  if (s.opens === 0) return { count: "Not opened yet", rest: "" };
-  if (s.opens === 1) return { count: "Opened", rest: stamp(s.firstOpenAt!, now) };
-  return { count: `Opened ${s.opens} times`, rest: `· last ${stamp(s.lastOpenAt!, now)}` };
+export function lateText(late: OpenSummary["late"]): string {
+  if (!late) return "";
+  return late.kind === "after_send" ? `${late.days} days after sending` : `reopened after ${late.days} days`;
+}
+
+export function summaryText(s: OpenSummary, now = Date.now()): { count: string; rest: string; late: string } {
+  const late = lateText(s.late);
+  if (s.opens === 0) return { count: "Not opened yet", rest: "", late };
+  if (s.opens === 1) return { count: "Opened", rest: stamp(s.firstOpenAt!, now), late };
+  return { count: `Opened ${s.opens} times`, rest: `· last ${stamp(s.lastOpenAt!, now)}`, late };
 }
 
 export function rowTooltip(t: ThreadSummary, now = Date.now()): string {
   if (t.opens === 0) return t.tracked === 1 ? "Sent · not opened yet" : `${t.tracked} tracked · none opened yet`;
   const opens = t.opens === 1 ? "Opened once" : `Opened ${t.opens} times`;
-  return `${opens} · last ${ago(t.lastOpenAt!, now)}`;
+  const late = lateText(t.late);
+  return `${opens} · last ${ago(t.lastOpenAt!, now)}${late ? ` · ${late}` : ""}`;
 }
 
 export function rowImage(t: ThreadSummary) {
@@ -42,6 +49,12 @@ export function statusElement(doc: Document, s: OpenSummary, now = Date.now()): 
     const rest = doc.createElement("span");
     rest.textContent = text.rest;
     line.append(rest);
+  }
+  if (text.late) {
+    const late = doc.createElement("span");
+    late.className = "omt-status-late";
+    late.textContent = text.late;
+    line.append(late);
   }
   root.append(line);
 

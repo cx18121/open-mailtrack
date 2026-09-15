@@ -49,3 +49,9 @@
   min-width: 60px;
   color: #1f1f1f;
 }
+.omt-status-late {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #fef7e0;
+  color: #b06000;
+}

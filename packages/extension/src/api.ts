@@ -1,8 +1,10 @@
 import type { Settings } from "./settings.js";
 
 export type Registration = { id: string; sender: string; recipients: string[]; subject: string };
-export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[] };
-export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null };
+export type Late = { kind: "after_send" | "after_previous"; days: number } | null;
+export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[]; late: Late };
+export type TrackedMessage = OpenSummary & { id: string; subject: string; gmail_thread_id: string | null; sent_at: number | null };
+export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null; late: Late };
 export type Status = { messages: Record<string, OpenSummary>; threads: Record<string, ThreadSummary> };
 
 export function createApi(settings: Settings) {
@@ -24,6 +26,10 @@ export function createApi(settings: Settings) {
     status: async (messageIds: string[], threadIds: string[]): Promise<Status> => {
       const q = new URLSearchParams({ messageIds: messageIds.join(","), threadIds: threadIds.join(",") });
       return (await call(`/status?${q}`, "GET")).json();
+    },
+    list: async (offset: number, limit: number): Promise<{ total: number; messages: TrackedMessage[] }> => {
+      const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+      return (await call(`/messages?${q}`, "GET")).json();
     },
   };
 }
