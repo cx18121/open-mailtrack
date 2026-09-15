@@ -41,7 +41,7 @@ Tracking is on for every send, including replies. The double-check button in the
 
 ## CLI
 
-Create a Google OAuth client: Cloud Console → enable the Gmail API → OAuth consent screen (External, add yourself as a test user, then **Publish** so tokens do not expire after 7 days) → Credentials → OAuth client ID → Desktop app. Only the `gmail.send` scope is used; the one-time "unverified app" warning is expected.
+Create a Google OAuth client: Cloud Console → enable the Gmail API → OAuth consent screen (External, add yourself as a test user, then **Publish** so tokens do not expire after 7 days) → Credentials → OAuth client ID → Desktop app.
 
 ```bash
 pnpm --filter @open-mailtrack/cli build
@@ -68,8 +68,6 @@ pnpm install && pnpm test && pnpm typecheck
 API_KEY=dev pnpm dev:server                    # http://localhost:8787
 pnpm --filter @open-mailtrack/extension dev    # rebuilds dist on change
 ```
-
-Recipients are not told they are being tracked. Whether that needs consent depends on where you and they are.
 
 ## License
 
