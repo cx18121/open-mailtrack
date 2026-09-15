@@ -1,9 +1,8 @@
 #!/usr/bin/env node
-import { readFileSync } from "node:fs";
 import { parseArgs } from "node:util";
-import { parse } from "csv-parse/sync";
 import { configPath, readConfig, writeConfig, type Config } from "./config.js";
 import { accessToken, authorize, sendRaw } from "./gmail.js";
+import { attachmentPaths, readRows } from "./input.js";
 import { buildRaw } from "./mime.js";
 import { createTracked, markSent } from "./tracker.js";
 
@@ -12,7 +11,8 @@ const usage = `openmt <command>
   auth   Configure the server and Google credentials, then sign in to Gmail
          --server <url> --api-key <key> --client-id <id> --client-secret <secret>
          --sender-name <name> --sender-email <email>
-  send   Send tracked mail from a CSV with columns contact_email, subject, body
+  send   Send tracked mail from a CSV or XLSX with columns contact_email, subject, body.
+         Every file in ./files is attached to every email.
          --input <file> [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
 `;
 
@@ -71,13 +71,16 @@ async function send(argv: string[]) {
     },
   });
   const config = readConfig();
-  const rows = parse(readFileSync(values.input, "utf8"), { columns: true, skip_empty_lines: true }) as Record<string, string>[];
+  const rows = await readRows(values.input);
   const batch = rows.slice(0, Number(values.limit));
+  const attachments = attachmentPaths();
   const dryRun = values["dry-run"];
   const delayMs = Number(values.delay) * 1000;
   const from = `${config.senderName} <${config.senderEmail}>`;
 
-  console.log(`Sending ${batch.length} emails via Gmail (${dryRun ? "DRY RUN" : "LIVE"})\n`);
+  console.log(`Sending ${batch.length} emails via Gmail (${dryRun ? "DRY RUN" : "LIVE"})`);
+  if (attachments.length) console.log(`Attaching ${attachments.join(", ")}`);
+  console.log();
   const token = dryRun ? "" : await accessToken(config.google);
   let sent = 0;
   let failed = 0;
@@ -101,7 +104,7 @@ async function send(argv: string[]) {
         recipients: [to, ...(values.cc ? [values.cc] : [])],
         subject,
       });
-      const result = await sendRaw(token, buildRaw({ from, to, cc: values.cc, subject, text: body, pixelUrl: tracked.pixelUrl }));
+      const result = await sendRaw(token, buildRaw({ from, to, cc: values.cc, subject, text: body, pixelUrl: tracked.pixelUrl, attachments }));
       await markSent(config, tracked.id, result);
       console.log(`${label} sent (${tracked.id})`);
       sent++;

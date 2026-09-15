@@ -3,7 +3,9 @@
   "version": "0.0.0",
   "private": true,
   "type": "module",
-  "bin": { "openmt": "./dist/index.js" },
+  "bin": {
+    "openmt": "./dist/index.js"
+  },
   "scripts": {
     "dev": "tsx src/index.ts",
     "build": "tsc -p tsconfig.json",
@@ -11,7 +13,8 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "csv-parse": "^6.1.0"
+    "csv-parse": "^6.1.0",
+    "read-excel-file": "9.3.10"
   },
   "devDependencies": {
     "@types/node": "^26.6.0",

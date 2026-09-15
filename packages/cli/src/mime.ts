@@ -1,4 +1,6 @@
 import { randomBytes } from "node:crypto";
+import { readFileSync } from "node:fs";
+import { basename } from "node:path";
 
 export type Mail = {
   from: string;
@@ -7,6 +9,7 @@ export type Mail = {
   subject: string;
   text: string;
   pixelUrl: string;
+  attachments?: string[];
 };
 
 const escapeHtml = (s: string) =>
@@ -27,29 +30,55 @@ export function textToHtml(text: string) {
 const encodeHeader = (v: string) =>
   /^[\x00-\x7F]*$/.test(v) ? v : `=?UTF-8?B?${Buffer.from(v).toString("base64")}?=`;
 
-export function buildRaw(mail: Mail): string {
+const b64 = (data: string | Buffer) => Buffer.from(data).toString("base64").replace(/(.{76})/g, "$1\r\n");
+
+function alternative(mail: Mail): string[] {
   const boundary = `alt_${randomBytes(12).toString("hex")}`;
   const html = `<div>${textToHtml(mail.text)}</div>${pixelTag(mail.pixelUrl)}`;
-  const lines = [
-    "MIME-Version: 1.0",
-    `From: ${mail.from}`,
-    `To: ${mail.to}`,
-    ...(mail.cc ? [`Cc: ${mail.cc}`] : []),
-    `Subject: ${encodeHeader(mail.subject)}`,
+  return [
     `Content-Type: multipart/alternative; boundary="${boundary}"`,
     "",
     `--${boundary}`,
     "Content-Type: text/plain; charset=UTF-8",
     "Content-Transfer-Encoding: base64",
     "",
-    Buffer.from(mail.text).toString("base64"),
+    b64(mail.text),
     `--${boundary}`,
     "Content-Type: text/html; charset=UTF-8",
     "Content-Transfer-Encoding: base64",
     "",
-    Buffer.from(html).toString("base64"),
+    b64(html),
     `--${boundary}--`,
-    "",
   ];
-  return Buffer.from(lines.join("\r\n")).toString("base64url");
+}
+
+function mixed(mail: Mail, attachments: string[]): string[] {
+  const boundary = `mix_${randomBytes(12).toString("hex")}`;
+  return [
+    `Content-Type: multipart/mixed; boundary="${boundary}"`,
+    "",
+    `--${boundary}`,
+    ...alternative(mail),
+    ...attachments.flatMap((path) => [
+      `--${boundary}`,
+      `Content-Type: application/octet-stream; name="${basename(path)}"`,
+      `Content-Disposition: attachment; filename="${basename(path)}"`,
+      "Content-Transfer-Encoding: base64",
+      "",
+      b64(readFileSync(path)),
+    ]),
+    `--${boundary}--`,
+  ];
+}
+
+export function buildRaw(mail: Mail): string {
+  const headers = [
+    "MIME-Version: 1.0",
+    `From: ${mail.from}`,
+    `To: ${mail.to}`,
+    ...(mail.cc ? [`Cc: ${mail.cc}`] : []),
+    `Subject: ${encodeHeader(mail.subject)}`,
+  ];
+  const body = mail.attachments?.length ? mixed(mail, mail.attachments) : alternative(mail);
+  return Buffer.from([...headers, ...body, ""].join("\r\n")).toString("base64url");
 }

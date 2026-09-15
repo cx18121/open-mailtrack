@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { buildRaw, textToHtml } from "./mime.js";
 
@@ -22,5 +25,19 @@ describe("buildRaw", () => {
     expect(decode(parts[1])).toBe("line1\nline2");
     expect(decode(parts[2])).toContain('<img src="https://t/p/abc.gif" width="1" height="1"');
     expect(decode(parts[2])).toContain("line1<br>\nline2");
+  });
+
+  it("wraps the alternative part and attachments in multipart/mixed", () => {
+    const dir = mkdtempSync(join(tmpdir(), "omt-"));
+    const file = join(dir, "resume.pdf");
+    writeFileSync(file, "%PDF-fake");
+    const raw = Buffer.from(
+      buildRaw({ from: "Me <me@x.com>", to: "a@y.com", subject: "hi", text: "t", pixelUrl: "https://t/p/abc.gif", attachments: [file] }),
+      "base64url",
+    ).toString();
+    expect(raw).toContain('Content-Type: multipart/mixed; boundary="mix_');
+    expect(raw).toContain('Content-Type: multipart/alternative; boundary="alt_');
+    expect(raw).toContain('Content-Disposition: attachment; filename="resume.pdf"');
+    expect(raw).toContain(Buffer.from("%PDF-fake").toString("base64"));
   });
 });
