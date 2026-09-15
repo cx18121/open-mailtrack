@@ -37,13 +37,20 @@ create index if not exists messages_gmail_message_id on messages (gmail_message_
 
 create table if not exists hits (
   id integer primary key autoincrement,
-  message_id text not null references messages (id),
+  message_id text not null,
   at integer not null,
   ip text,
   user_agent text,
   headers text not null
 );
 create index if not exists hits_message_id on hits (message_id, at);
+
+create table if not exists self_views (
+  id integer primary key autoincrement,
+  gmail_thread_id text not null,
+  at integer not null
+);
+create index if not exists self_views_thread on self_views (gmail_thread_id, at);
 `;
 
 type MessageRow = Omit<Message, "recipients"> & { recipients: string };
@@ -70,6 +77,8 @@ export function openDb(path: string) {
     `insert into hits (message_id, at, ip, user_agent, headers) values (?, ?, ?, ?, ?)`,
   );
   const selectHits = db.prepare(`select * from hits where message_id = ? order by at`);
+  const insertSelfView = db.prepare(`insert into self_views (gmail_thread_id, at) values (?, ?)`);
+  const selectSelfViews = db.prepare(`select at from self_views where gmail_thread_id = ? order by at`);
 
   return {
     createMessage(m: Pick<Message, "id" | "sender" | "recipients" | "subject" | "source">) {
@@ -90,6 +99,12 @@ export function openDb(path: string) {
     },
     listHits(messageId: string) {
       return (selectHits.all(messageId) as HitRow[]).map(rowToHit);
+    },
+    recordSelfView(gmailThreadId: string) {
+      insertSelfView.run(gmailThreadId, Date.now());
+    },
+    listSelfViews(gmailThreadId: string) {
+      return (selectSelfViews.all(gmailThreadId) as { at: number }[]).map((r) => r.at);
     },
     close() {
       db.close();
