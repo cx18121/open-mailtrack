@@ -1,5 +1,6 @@
 import * as InboxSDK from "@inboxsdk/core";
-import { createApi } from "./api.js";
+import { createApi, createStatusBatcher } from "./api.js";
+import { icon, label } from "./marks.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, newId, PIXEL_ATTR } from "./tracking.js";
 
@@ -13,6 +14,7 @@ async function main() {
     return;
   }
   const api = createApi(settings);
+  const status = createStatusBatcher(api);
   const sdk = await InboxSDK.load(2, APP_ID);
   const me = sdk.User.getEmailAddress().toLowerCase();
 
@@ -48,9 +50,18 @@ async function main() {
     });
   });
 
-  sdk.Conversations.registerThreadViewHandler(async (thread) => {
-    const threadId = await thread.getThreadIDAsync();
-    api.selfView(threadId).catch((err) => log(err));
+  sdk.Conversations.registerMessageViewHandler(async (message) => {
+    if (message.getSender().emailAddress.toLowerCase() !== me) return;
+    const messageId = await message.getMessageIDAsync();
+    api.view(messageId).catch((err) => log(err));
+    const summary = await status.message(messageId);
+    if (summary) message.addAttachmentIcon(icon(summary));
+  });
+
+  sdk.Lists.registerThreadRowViewHandler(async (row) => {
+    const threadId = await row.getThreadIDAsync();
+    const summary = await status.thread(threadId);
+    if (summary) row.addLabel(label(summary));
   });
 }
 
