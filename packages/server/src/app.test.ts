@@ -57,7 +57,7 @@ describe("pixel", () => {
     expect((await app.request("/p/short.gif")).status).toBe(200);
   });
 
-  it("records self views by thread and returns them with the message", async () => {
+  it("classifies the sender's own view and reports status by gmail message and thread id", async () => {
     const app = setup();
     const { id } = await (
       await app.request("/api/messages", {
@@ -71,10 +71,17 @@ describe("pixel", () => {
       headers: auth,
       body: JSON.stringify({ gmailMessageId: "gm1", gmailThreadId: "gt1" }),
     });
-    const sv = await app.request("/api/self-views", { method: "POST", headers: auth, body: JSON.stringify({ gmailThreadId: "gt1" }) });
-    expect(sv.status).toBe(204);
+    await app.request(`/p/${id}.gif`, { headers: { "user-agent": "GoogleImageProxy" } });
+    const view = await app.request("/api/views", { method: "POST", headers: auth, body: JSON.stringify({ gmailMessageId: "gm1" }) });
+    expect(view.status).toBe(204);
     const detail = await (await app.request(`/api/messages/${id}`, { headers: auth })).json();
-    expect(detail.selfViews).toHaveLength(1);
+    expect(detail.views).toHaveLength(1);
+    expect(detail.hits[0].kind).toBe("self_view");
+    expect(detail.opens).toBe(0);
+
+    const status = await (await app.request("/api/status?messageIds=gm1,unknown&threadIds=gt1", { headers: auth })).json();
+    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null } });
+    expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 0 });
   });
 
   it("answers cors preflight for the api", async () => {

@@ -1,7 +1,8 @@
 import { randomBytes } from "node:crypto";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
-import type { Db } from "./db.js";
+import { classifyHit, summarize, CLASSIFIER_VERSION } from "./classify.js";
+import type { Db, Message } from "./db.js";
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 export const newId = () => randomBytes(16).toString("base64url");
@@ -12,6 +13,11 @@ export type Config = { apiKey: string; publicUrl: string };
 
 export function createApp(db: Db, config: Config) {
   const app = new Hono();
+
+  const classified = (m: Message) => {
+    const views = m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
+    return db.listHits(m.id).map((h) => classifyHit(h, views));
+  };
 
   app.get("/p/:file", (c) => {
     const id = c.req.param("file").replace(/\.gif$/, "");
@@ -74,25 +80,44 @@ export function createApp(db: Db, config: Config) {
     return ok ? c.body(null, 204) : c.json({ error: "not found" }, 404);
   });
 
-  api.post("/self-views", async (c) => {
-    const body = await c.req.json<{ gmailThreadId: string }>();
-    if (!body.gmailThreadId) return c.json({ error: "gmailThreadId required" }, 400);
-    db.recordSelfView(body.gmailThreadId);
+  api.post("/views", async (c) => {
+    const body = await c.req.json<{ gmailMessageId: string }>();
+    if (!body.gmailMessageId) return c.json({ error: "gmailMessageId required" }, 400);
+    db.recordView(body.gmailMessageId);
     return c.body(null, 204);
   });
 
+  api.get("/status", (c) => {
+    const split = (v: string | undefined) => (v ? v.split(",").filter(Boolean).slice(0, 200) : []);
+    const messageIds = split(c.req.query("messageIds"));
+    const threadIds = split(c.req.query("threadIds"));
+    const messages: Record<string, ReturnType<typeof summarize>> = {};
+    for (const m of db.findByGmailMessageIds(messageIds)) messages[m.gmail_message_id!] = summarize(classified(m));
+    const threads: Record<string, ReturnType<typeof summarize> & { tracked: number }> = {};
+    for (const m of db.findByGmailThreadIds(threadIds)) {
+      const s = summarize(classified(m));
+      const t = (threads[m.gmail_thread_id!] ??= { tracked: 0, opens: 0, firstOpenAt: null, lastOpenAt: null });
+      t.tracked++;
+      t.opens += s.opens;
+      if (s.firstOpenAt && (!t.firstOpenAt || s.firstOpenAt < t.firstOpenAt)) t.firstOpenAt = s.firstOpenAt;
+      if (s.lastOpenAt && (!t.lastOpenAt || s.lastOpenAt > t.lastOpenAt)) t.lastOpenAt = s.lastOpenAt;
+    }
+    return c.json({ messages, threads, classifierVersion: CLASSIFIER_VERSION });
+  });
+
   api.get("/messages", (c) => {
-    const messages = db.listMessages().map((m) => ({ ...m, hits: db.listHits(m.id).length }));
-    return c.json(messages);
+    return c.json(db.listMessages().map((m) => ({ ...m, ...summarize(classified(m)), hits: db.listHits(m.id).length })));
   });
 
   api.get("/messages/:id", (c) => {
     const message = db.getMessage(c.req.param("id"));
     if (!message) return c.json({ error: "not found" }, 404);
+    const hits = classified(message);
     return c.json({
       ...message,
-      hits: db.listHits(message.id),
-      selfViews: message.gmail_thread_id ? db.listSelfViews(message.gmail_thread_id) : [],
+      ...summarize(hits),
+      hits: db.listHits(message.id).map((h, i) => ({ ...h, kind: hits[i].kind, reason: hits[i].reason })),
+      views: message.gmail_message_id ? db.listViews(message.gmail_message_id) : [],
     });
   });
 

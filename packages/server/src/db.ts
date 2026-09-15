@@ -45,12 +45,13 @@ create table if not exists hits (
 );
 create index if not exists hits_message_id on hits (message_id, at);
 
-create table if not exists self_views (
+create table if not exists message_views (
   id integer primary key autoincrement,
-  gmail_thread_id text not null,
+  gmail_message_id text not null,
   at integer not null
 );
-create index if not exists self_views_thread on self_views (gmail_thread_id, at);
+create index if not exists message_views_message on message_views (gmail_message_id, at);
+drop table if exists self_views;
 `;
 
 type MessageRow = Omit<Message, "recipients"> & { recipients: string };
@@ -77,8 +78,12 @@ export function openDb(path: string) {
     `insert into hits (message_id, at, ip, user_agent, headers) values (?, ?, ?, ?, ?)`,
   );
   const selectHits = db.prepare(`select * from hits where message_id = ? order by at`);
-  const insertSelfView = db.prepare(`insert into self_views (gmail_thread_id, at) values (?, ?)`);
-  const selectSelfViews = db.prepare(`select at from self_views where gmail_thread_id = ? order by at`);
+  const insertView = db.prepare(`insert into message_views (gmail_message_id, at) values (?, ?)`);
+  const selectViews = db.prepare(`select at from message_views where gmail_message_id = ? order by at`);
+  const selectByGmailMessageIds = (n: number) =>
+    db.prepare(`select * from messages where gmail_message_id in (${Array(n).fill("?").join(",")})`);
+  const selectByGmailThreadIds = (n: number) =>
+    db.prepare(`select * from messages where gmail_thread_id in (${Array(n).fill("?").join(",")})`);
 
   return {
     createMessage(m: Pick<Message, "id" | "sender" | "recipients" | "subject" | "source">) {
@@ -100,11 +105,17 @@ export function openDb(path: string) {
     listHits(messageId: string) {
       return (selectHits.all(messageId) as HitRow[]).map(rowToHit);
     },
-    recordSelfView(gmailThreadId: string) {
-      insertSelfView.run(gmailThreadId, Date.now());
+    recordView(gmailMessageId: string) {
+      insertView.run(gmailMessageId, Date.now());
     },
-    listSelfViews(gmailThreadId: string) {
-      return (selectSelfViews.all(gmailThreadId) as { at: number }[]).map((r) => r.at);
+    listViews(gmailMessageId: string) {
+      return (selectViews.all(gmailMessageId) as { at: number }[]).map((r) => r.at);
+    },
+    findByGmailMessageIds(ids: string[]) {
+      return ids.length ? (selectByGmailMessageIds(ids.length).all(...ids) as MessageRow[]).map(rowToMessage) : [];
+    },
+    findByGmailThreadIds(ids: string[]) {
+      return ids.length ? (selectByGmailThreadIds(ids.length).all(...ids) as MessageRow[]).map(rowToMessage) : [];
     },
     close() {
       db.close();
