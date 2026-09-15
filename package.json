@@ -1,0 +1,13 @@
+{
+  "name": "open-mailtrack",
+  "private": true,
+  "packageManager": "pnpm@11.20.0",
+  "scripts": {
+    "dev:server": "pnpm --filter @open-mailtrack/server dev",
+    "test": "pnpm -r test",
+    "typecheck": "pnpm -r typecheck"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
