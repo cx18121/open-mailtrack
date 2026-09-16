@@ -6,14 +6,14 @@ Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 - **Chrome extension**: adds the pixel to mail you send from Gmail and shows open status in your sent list and on each message
 - **CLI** (`openmt`): sends tracked mail from a CSV or XLSX through the Gmail API. Shows up in the same sent list marks
 
-## What the marks mean
+## how it works
 
 A tracked message carries a 1×1 image on your server so when the recipient's client renders the message, the server records a response. A few notes:
 - Reopening in the same Gmail tab does not refetch, but a new session or device does
 - Your own views on the email are reported by the extension and excluded
 - Untested with Apple mail and Outlook email client
 
-## Server
+## server
 
 You need a public HTTPS hostname. The compose file uses a Cloudflare Tunnel so nothing inbound is opened.
 
@@ -26,7 +26,7 @@ docker compose up -d --build
 
 The tunnel's public hostname should point at `server:8787`. Data lives in the `data` volume.
 
-## Extension
+## extension
 
 ```bash
 pnpm install
@@ -59,7 +59,7 @@ Any sender can use the server directly with `Authorization: Bearer <API_KEY>`:
 - `PATCH /api/messages/:id` `{gmailMessageId, gmailThreadId}` after sending, so the extension can show status.
 - `GET /api/messages/:id` for every hit and its classification.
 
-## Development
+## development
 
 ```bash
 pnpm install && pnpm test && pnpm typecheck
@@ -67,6 +67,6 @@ API_KEY=dev pnpm dev:server                    # http://localhost:8787
 pnpm --filter @open-mailtrack/extension dev    # rebuilds dist on change
 ```
 
-## License
+## license
 
 MIT
