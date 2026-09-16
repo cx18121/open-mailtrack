@@ -16,7 +16,7 @@ export function createApp(db: Db, config: Config) {
 
   const classified = (m: Message) => {
     const views = m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
-    return db.listHits(m.id).map((h) => classifyHit(h, views));
+    return db.listHits(m.id).map((h) => classifyHit(h, views, m.sent_at));
   };
   const summaryOf = (m: Message) => summarize(classified(m), m.sent_at);
 
