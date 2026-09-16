@@ -9,6 +9,8 @@ import { createPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 const APP_ID = "sdk_openmt_62266805c2";
 const TRACKED_ROUTE = "tracked";
 const REFRESH_MS = 30_000;
+/** Gmail refetches images whenever it re-renders a thread, so keep reporting the view while it is on screen. */
+const VIEW_HEARTBEAT_MS = 10_000;
 const log = (...args: unknown[]) => console.log("[open-mailtrack]", ...args);
 
 async function main() {
@@ -79,7 +81,10 @@ async function main() {
   sdk.Conversations.registerMessageViewHandler(async (message) => {
     if (message.getSender().emailAddress.toLowerCase() !== me) return;
     const messageId = await message.getMessageIDAsync();
-    api.view(messageId).catch((err) => log(err));
+    const reportView = () => api.view(messageId).catch((err) => log(err));
+    reportView();
+    const heartbeat = setInterval(() => document.visibilityState === "visible" && reportView(), VIEW_HEARTBEAT_MS);
+    message.on("destroy", () => clearInterval(heartbeat));
 
     let current: HTMLElement | null = null;
     const stop = Kefir.fromEvents<void, unknown>(message, "destroy");
