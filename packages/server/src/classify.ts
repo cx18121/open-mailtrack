@@ -1,4 +1,4 @@
-export const CLASSIFIER_VERSION = 2;
+export const CLASSIFIER_VERSION = 3;
 
 export type HitKind = "open" | "self_view" | "prefetch";
 
@@ -13,18 +13,22 @@ const GOOGLE_PROXY = /GoogleImageProxy/;
 /**
  * Rules come from recorded traffic. Gmail and Workspace recipients fetch through GoogleImageProxy.
  * The sender's own views land within milliseconds of the extension's view signal. When a reply lands
- * in a thread the recipient already viewed, Gmail fetches its images about 17 s after send with nobody
- * looking; new threads showed no such fetch. A browser can fetch twice per render.
+ * in a thread the recipient already viewed, Gmail fetches the images of every message in that thread
+ * about 17 s after send with nobody looking; new threads showed no such fetch. A browser can fetch
+ * twice per render.
+ *
+ * `threadSentAts` are the send times of every tracked message in the same thread, this one included.
  */
 export function classifyHit(
   hit: { at: number; user_agent: string | null },
   selfViewsAt: number[],
-  sentAt: number | null = null,
+  threadSentAts: number[] = [],
 ): ClassifiedHit {
   const nearView = selfViewsAt.find((v) => hit.at >= v - SELF_VIEW_BEFORE_MS && hit.at <= v + SELF_VIEW_AFTER_MS);
   if (nearView !== undefined) return { at: hit.at, kind: "self_view", reason: `sender viewed message at ${nearView}` };
-  if (sentAt !== null && hit.at - sentAt <= DELIVERY_SCAN_MS && GOOGLE_PROXY.test(hit.user_agent ?? "")) {
-    return { at: hit.at, kind: "prefetch", reason: `google proxy fetch ${Math.round((hit.at - sentAt) / 1000)}s after send` };
+  const recentSend = threadSentAts.find((t) => hit.at >= t && hit.at - t <= DELIVERY_SCAN_MS);
+  if (recentSend !== undefined && GOOGLE_PROXY.test(hit.user_agent ?? "")) {
+    return { at: hit.at, kind: "prefetch", reason: `google proxy fetch ${Math.round((hit.at - recentSend) / 1000)}s after a send in this thread` };
   }
   return { at: hit.at, kind: "open", reason: "no exclusion matched" };
 }

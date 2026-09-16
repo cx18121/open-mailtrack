@@ -19,15 +19,22 @@ describe("classifyHit", () => {
   });
 
   it("treats a recipient's proxy fetch with no view signal as an open (matrix, ext 1, +440s)", () => {
-    expect(classifyHit(hit(1789500109100), [], 1789499669079).kind).toBe("open");
+    expect(classifyHit(hit(1789500109100), [], [1789499669079]).kind).toBe("open");
   });
 
   it("treats a google proxy fetch within a minute of send as gmail's delivery scan (reply into a viewed thread, +17s)", () => {
     const sentAt = 1789533183570;
-    expect(classifyHit(hit(sentAt + 16_531), [], sentAt)).toMatchObject({ kind: "prefetch" });
-    expect(classifyHit(hit(sentAt + 90_000), [], sentAt).kind).toBe("open");
-    expect(classifyHit({ at: sentAt + 5_000, user_agent: "Mozilla/5.0 (iPhone) Safari" }, [], sentAt).kind).toBe("open");
-    expect(classifyHit(hit(sentAt + 5_000), [], null).kind).toBe("open");
+    expect(classifyHit(hit(sentAt + 16_531), [], [sentAt])).toMatchObject({ kind: "prefetch" });
+    expect(classifyHit(hit(sentAt + 90_000), [], [sentAt]).kind).toBe("open");
+    expect(classifyHit({ at: sentAt + 5_000, user_agent: "Mozilla/5.0 (iPhone) Safari" }, [], [sentAt]).kind).toBe("open");
+    expect(classifyHit(hit(sentAt + 5_000), [], []).kind).toBe("open");
+  });
+
+  it("applies the scan window to the original message when a later reply in the thread triggers it (ext 1, 04:23:32)", () => {
+    const originalSentAt = 1789499669079;
+    const replySentAt = 1789532595941;
+    expect(classifyHit(hit(replySentAt + 16_239), [], [originalSentAt, replySentAt]).kind).toBe("prefetch");
+    expect(classifyHit(hit(replySentAt - 3_600_000), [], [originalSentAt, replySentAt]).kind).toBe("open");
   });
 });
 

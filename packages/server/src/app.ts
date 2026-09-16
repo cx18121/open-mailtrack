@@ -16,7 +16,10 @@ export function createApp(db: Db, config: Config) {
 
   const classified = (m: Message) => {
     const views = m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
-    return db.listHits(m.id).map((h) => classifyHit(h, views, m.sent_at));
+    const threadSentAts = (m.gmail_thread_id ? db.findByGmailThreadIds([m.gmail_thread_id]) : [m])
+      .map((t) => t.sent_at)
+      .filter((t): t is number => t !== null);
+    return db.listHits(m.id).map((h) => classifyHit(h, views, threadSentAts));
   };
   const summaryOf = (m: Message) => summarize(classified(m), m.sent_at);
 
