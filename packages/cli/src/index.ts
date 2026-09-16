@@ -4,6 +4,7 @@ import { configPath, readConfig, writeConfig, type Config } from "./config.js";
 import { accessToken, authorize, sendRaw } from "./gmail.js";
 import { attachmentPaths, readRows } from "./input.js";
 import { buildRaw } from "./mime.js";
+import { status } from "./status.js";
 import { createTracked, markSent } from "./tracker.js";
 
 const usage = `openmt <command>
@@ -14,6 +15,8 @@ const usage = `openmt <command>
   send   Send tracked mail from a CSV or XLSX with columns contact_email, subject, body.
          Every file in ./files is attached to every email.
          --input <file> [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
+  status Tracked messages, most recently opened first
+         [--since 7d] [--opened | --unopened] [--json]
 `;
 
 async function auth(argv: string[]) {
@@ -119,7 +122,7 @@ async function send(argv: string[]) {
 }
 
 const [command, ...rest] = process.argv.slice(2);
-const commands: Record<string, (argv: string[]) => Promise<void>> = { auth, send };
+const commands: Record<string, (argv: string[]) => Promise<void>> = { auth, send, status };
 const run = commands[command ?? ""];
 if (!run) {
   console.log(usage);
