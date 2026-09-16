@@ -2,9 +2,9 @@
 
 Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 
-- **server**: This records tracking pixel hits. Uses node, SQLite, and a Docker container
-- **extension**: adds the pixel to mail you send from Gmail and shows open status in your sent list and on each message
-- **cli** (`openmt`): sends tracked mail from a CSV or XLSX through the Gmail API. Shows up in the same sent list marks
+- **Server**: this records tracking pixel hits. Uses node, SQLite, and a Docker container
+- **Chrome extension**: adds the pixel to mail you send from Gmail and shows open status in your sent list and on each message
+- **CLI** (`openmt`): sends tracked mail from a CSV or XLSX through the Gmail API. Shows up in the same sent list marks
 
 ## What the marks mean
 
