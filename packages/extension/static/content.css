@@ -55,3 +55,63 @@
   background: #fef7e0;
   color: #b06000;
 }
+
+.omt-tracked {
+  padding: 8px 0;
+  font-size: 14px;
+  color: #1f1f1f;
+}
+.omt-tracked-empty {
+  margin: 48px 0;
+  text-align: center;
+  color: #5f6368;
+}
+.omt-tracked-list {
+  border-top: 1px solid #e3e3e3;
+}
+.omt-tracked-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  height: 40px;
+  padding: 0 16px 0 24px;
+  border-bottom: 1px solid #e3e3e3;
+  color: inherit;
+  text-decoration: none;
+  white-space: nowrap;
+}
+a.omt-tracked-row:hover {
+  background: #f2f6fc;
+  box-shadow: inset 1px 0 0 #dadce0, inset -1px 0 0 #dadce0, 0 1px 2px 0 rgba(60, 64, 67, 0.3), 0 1px 3px 1px rgba(60, 64, 67, 0.15);
+  z-index: 1;
+}
+a.omt-tracked-row:focus-visible {
+  outline: 2px solid #0b57d0;
+  outline-offset: -2px;
+}
+.omt-tracked-row img {
+  width: 18px;
+  height: 16px;
+  flex: none;
+}
+.omt-tracked-to {
+  width: 168px;
+  flex: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.omt-tracked-subject {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.omt-tracked-status {
+  flex: none;
+  font-size: 12px;
+  color: #5f6368;
+  font-variant-numeric: tabular-nums;
+}
+.omt-tracked-opened .omt-tracked-status {
+  color: #188038;
+}

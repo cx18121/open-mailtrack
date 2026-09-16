@@ -2,6 +2,7 @@ import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
 import { createApi, createStatusBatcher, type ThreadSummary } from "./api.js";
 import { rowImage, statusElement } from "./marks.js";
+import { trackedList } from "./tracked.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 
@@ -107,14 +108,18 @@ async function main() {
     row.addImage(image);
   });
 
-  sdk.Router.handleCustomListRoute(TRACKED_ROUTE, async (offset: number, max: number) => {
-    const { total, messages } = await api.list(offset, max);
-    const seen = new Set<string>();
-    const threads = messages
-      .map((m) => m.gmail_thread_id)
-      .filter((id): id is string => !!id && !seen.has(id) && !!seen.add(id))
-      .map((gmailThreadId) => ({ gmailThreadId }));
-    return { total, threads };
+  sdk.Router.handleCustomRoute(TRACKED_ROUTE, (route) => {
+    const el = route.getElement();
+    const stop = Kefir.fromEvents<void, unknown>(route, "destroy");
+    ticks
+      .takeUntilBy(stop)
+      .flatMapLatest(() => Kefir.fromPromise(api.list(0, 200)))
+      .onValue(({ messages }) => {
+        el.replaceChildren(
+          trackedList(el.ownerDocument, messages, (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId })),
+        );
+      })
+      .onError((err) => log(err));
   });
 
   sdk.NavMenu.addNavItem({

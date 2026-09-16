@@ -3,7 +3,14 @@ import type { Settings } from "./settings.js";
 export type Registration = { id: string; sender: string; recipients: string[]; subject: string };
 export type Late = { kind: "after_send" | "after_previous"; days: number } | null;
 export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[]; late: Late };
-export type TrackedMessage = OpenSummary & { id: string; subject: string; gmail_thread_id: string | null; sent_at: number | null };
+export type TrackedMessage = OpenSummary & {
+  id: string;
+  subject: string;
+  recipients: string[];
+  gmail_thread_id: string | null;
+  sent_at: number | null;
+  created_at: number;
+};
 export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null; late: Late };
 export type Status = { messages: Record<string, OpenSummary>; threads: Record<string, ThreadSummary> };
 
