@@ -8,6 +8,8 @@ Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 
 ## What the marks mean
 
+A grey single check means sent but not opened. A green double check means opened; hover it in a list, or read the line above the message, for the count and last open time. The **Tracked** item in Gmail's sidebar lists every tracked email, most recently opened first.
+
 A tracked message carries a 1×1 image on your server so when the recipient's client renders the message, the server records a response. A few notes:
 - Reopening in the same Gmail tab does not refetch, but a new session or device does
 - Your own views on the email are reported by the extension and excluded
