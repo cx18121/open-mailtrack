@@ -22,11 +22,10 @@ async function main() {
   const sdk = await InboxSDK.load(2, APP_ID);
   const me = sdk.User.getEmailAddress().toLowerCase();
 
-  /** Emits now and every REFRESH_MS while the page is visible, so marks update without a reload. */
-  const ticks = Kefir.merge([
-    Kefir.constant(null),
-    Kefir.interval(REFRESH_MS, null).filter(() => document.visibilityState === "visible"),
-  ]);
+  /** Emits immediately for each subscriber and then every REFRESH_MS while the page is visible. */
+  const ticks = Kefir.interval(REFRESH_MS, null)
+    .filter(() => document.visibilityState === "visible")
+    .toProperty(() => null);
 
   sdk.Compose.registerComposeViewHandler((compose) => {
     let pixel: HTMLImageElement | null = null;
