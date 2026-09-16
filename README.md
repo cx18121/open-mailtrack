@@ -1,6 +1,6 @@
 # open-mailtrack
 
-Self-hosted open tracking for Gmail.
+Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 
 - **server**: This records tracking pixel hits. Uses node, SQLite, and a Docker container
 - **extension**: adds the pixel to mail you send from Gmail and shows open status in your sent list and on each message
