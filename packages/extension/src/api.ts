@@ -10,6 +10,7 @@ export type TrackedMessage = OpenSummary & {
   gmail_thread_id: string | null;
   sent_at: number | null;
   created_at: number;
+  replied_at: number | null;
 };
 export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null; late: Late };
 export type Status = { messages: Record<string, OpenSummary>; threads: Record<string, ThreadSummary> };
@@ -30,6 +31,7 @@ export function createApi(settings: Settings) {
     markSent: (id: string, gmailMessageId: string, gmailThreadId: string) =>
       call(`/messages/${id}`, "PATCH", { gmailMessageId, gmailThreadId }),
     view: (gmailMessageId: string) => call("/views", "POST", { gmailMessageId }),
+    replied: (gmailThreadId: string, repliedAt: number) => call("/replies", "POST", { gmailThreadId, repliedAt }),
     status: async (messageIds: string[], threadIds: string[]): Promise<Status> => {
       const q = new URLSearchParams({ messageIds: messageIds.join(","), threadIds: threadIds.join(",") });
       return (await call(`/status?${q}`, "GET")).json();

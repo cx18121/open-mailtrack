@@ -5,7 +5,7 @@ const now = 1_000_000_000_000;
 const h = (n: number) => now - n * 3_600_000;
 const msg = (over: Partial<TrackedMessage>): TrackedMessage => ({
   id: "x", subject: "Hello", recipients: ["a@b.co"], source: "cli", sent_at: h(30), created_at: h(30),
-  gmail_message_id: "g", gmail_thread_id: "t", opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null, ...over,
+  gmail_message_id: "g", gmail_thread_id: "t", replied_at: null, opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null, ...over,
 });
 
 describe("parseDuration", () => {
