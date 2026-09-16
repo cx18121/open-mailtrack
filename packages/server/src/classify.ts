@@ -7,7 +7,7 @@ export type ClassifiedHit = { at: number; kind: HitKind; reason: string };
 const SELF_VIEW_BEFORE_MS = 5_000;
 const SELF_VIEW_AFTER_MS = 15_000;
 const DEDUPE_MS = 10_000;
-const DELIVERY_SCAN_MS = 60_000;
+const DELIVERY_SCAN_MS = 30_000;
 const GOOGLE_PROXY = /GoogleImageProxy/;
 
 /**

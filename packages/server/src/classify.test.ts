@@ -25,7 +25,7 @@ describe("classifyHit", () => {
   it("treats a google proxy fetch within a minute of send as gmail's delivery scan (reply into a viewed thread, +17s)", () => {
     const sentAt = 1789533183570;
     expect(classifyHit(hit(sentAt + 16_531), [], [sentAt])).toMatchObject({ kind: "prefetch" });
-    expect(classifyHit(hit(sentAt + 90_000), [], [sentAt]).kind).toBe("open");
+    expect(classifyHit(hit(sentAt + 45_000), [], [sentAt]).kind).toBe("open");
     expect(classifyHit({ at: sentAt + 5_000, user_agent: "Mozilla/5.0 (iPhone) Safari" }, [], [sentAt]).kind).toBe("open");
     expect(classifyHit(hit(sentAt + 5_000), [], []).kind).toBe("open");
   });
