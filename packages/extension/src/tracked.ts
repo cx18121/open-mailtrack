@@ -10,20 +10,52 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
   return `${opens} ${ago(m.lastOpenAt!, now)}`;
 }
 
+export type Filter = "all" | "opened" | "unopened";
+const FILTERS: { key: Filter; label: string }[] = [
+  { key: "all", label: "All" },
+  { key: "opened", label: "Opened" },
+  { key: "unopened", label: "Not opened" },
+];
+
 /** The Tracked page: our own list in Gmail's visual language, sorted by the server (last open first). */
 export function trackedList(
   doc: Document,
-  messages: TrackedMessage[],
+  all: TrackedMessage[],
+  filter: Filter,
+  onFilter: (next: Filter) => void,
   onOpen: (gmailThreadId: string) => void,
   now = Date.now(),
 ): HTMLElement {
   const root = doc.createElement("div");
   root.className = "omt-tracked";
 
+  const bar = doc.createElement("div");
+  bar.className = "omt-chips";
+  bar.setAttribute("role", "tablist");
+  for (const f of FILTERS) {
+    const count = f.key === "all" ? all.length : all.filter((m) => (f.key === "opened") === m.opens > 0).length;
+    const chip = doc.createElement("button");
+    chip.type = "button";
+    chip.className = `omt-chip${f.key === filter ? " omt-chip-active" : ""}`;
+    chip.setAttribute("role", "tab");
+    chip.setAttribute("aria-selected", String(f.key === filter));
+    chip.append(f.label);
+    const n = doc.createElement("span");
+    n.className = "omt-chip-count";
+    n.textContent = String(count);
+    chip.append(n);
+    chip.addEventListener("click", () => onFilter(f.key));
+    bar.append(chip);
+  }
+  root.append(bar);
+
+  const messages = filter === "all" ? all : all.filter((m) => (filter === "opened") === m.opens > 0);
+  if (filter === "unopened") messages.sort((a, b) => (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at));
+
   if (messages.length === 0) {
     const empty = doc.createElement("p");
     empty.className = "omt-tracked-empty";
-    empty.textContent = "No tracked messages yet. Send one from Gmail or with openmt.";
+    empty.textContent = all.length === 0 ? "No tracked messages yet. Send one from Gmail or with openmt." : "Nothing here right now.";
     root.append(empty);
     return root;
   }

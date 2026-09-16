@@ -34,9 +34,10 @@ describe("rowText", () => {
 describe("trackedList", () => {
   it("renders rows that open the thread and shows the late badge", () => {
     const onOpen = vi.fn();
-    const el = trackedList(document, [msg({ opens: 1, lastOpenAt: h(1), late: { kind: "after_send", days: 3 } }), msg({ id: "y", gmail_thread_id: null })], onOpen, now);
+    const el = trackedList(document, [msg({ opens: 1, lastOpenAt: h(1), late: { kind: "after_send", days: 3 } }), msg({ id: "y", gmail_thread_id: null })], "all", () => {}, onOpen, now);
     const rows = el.querySelectorAll(".omt-tracked-row");
     expect(rows).toHaveLength(2);
+    expect([...el.querySelectorAll(".omt-chip")].map((c) => c.textContent)).toEqual(["All2", "Opened1", "Not opened1"]);
     expect(rows[0].tagName).toBe("A");
     expect(rows[0].querySelector(".omt-status-late")!.textContent).toBe("3 days after sending");
     expect(rows[0].querySelector(".omt-tracked-to")!.textContent).toBe("ana");
@@ -45,7 +46,16 @@ describe("trackedList", () => {
     expect(rows[1].tagName).toBe("DIV");
   });
 
-  it("has an empty state", () => {
-    expect(trackedList(document, [], () => {}).textContent).toContain("No tracked messages yet");
+  it("filters by chip and reports the change", () => {
+    const onFilter = vi.fn();
+    const el = trackedList(document, [msg({ opens: 1, lastOpenAt: h(1) }), msg({ id: "y" })], "unopened", onFilter, () => {}, now);
+    expect(el.querySelectorAll(".omt-tracked-row")).toHaveLength(1);
+    el.querySelectorAll<HTMLButtonElement>(".omt-chip")[1].click();
+    expect(onFilter).toHaveBeenCalledWith("opened");
+  });
+
+  it("has empty states", () => {
+    expect(trackedList(document, [], "all", () => {}, () => {}).textContent).toContain("No tracked messages yet");
+    expect(trackedList(document, [msg({})], "opened", () => {}, () => {}).textContent).toContain("Nothing here right now");
   });
 });

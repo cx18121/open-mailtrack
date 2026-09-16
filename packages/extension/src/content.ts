@@ -1,8 +1,9 @@
 import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
-import { createApi, createStatusBatcher, type ThreadSummary } from "./api.js";
+import { createApi, createStatusBatcher, type ThreadSummary, type TrackedMessage } from "./api.js";
 import { rowImage, statusElement } from "./marks.js";
-import { trackedList } from "./tracked.js";
+import { expandOperator, OPERATORS } from "./search.js";
+import { trackedList, type Filter } from "./tracked.js";
 import { loadSettings } from "./settings.js";
 import { createPixel, hasPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 
@@ -127,13 +128,26 @@ async function main() {
     note("Loading…");
 
     let alive = true;
+    let filter: Filter = "all";
+    let messages: TrackedMessage[] = [];
+    const draw = () =>
+      el.replaceChildren(
+        trackedList(
+          doc,
+          messages,
+          filter,
+          (next) => {
+            filter = next;
+            draw();
+          },
+          (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId }),
+        ),
+      );
     const render = async () => {
       try {
-        const { messages } = await api.list(0, 200);
+        ({ messages } = await api.list(0, 500));
         if (!alive) return;
-        el.replaceChildren(
-          trackedList(doc, messages, (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId })),
-        );
+        draw();
       } catch (err) {
         log("tracked list failed", err);
         if (alive) note("Could not load tracked messages.");
@@ -146,6 +160,13 @@ async function main() {
       clearInterval(timer);
     });
   });
+
+  for (const term of OPERATORS) {
+    sdk.Search.registerSearchQueryRewriter({
+      term,
+      termReplacer: async () => expandOperator(term, (await api.list(0, 500)).messages),
+    });
+  }
 
   await addTrackedNavItem(sdk);
 }
