@@ -4,13 +4,11 @@ import { createApi, createStatusBatcher, type ThreadSummary } from "./api.js";
 import { rowImage, statusElement } from "./marks.js";
 import { trackedList } from "./tracked.js";
 import { loadSettings } from "./settings.js";
-import { createPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
+import { createPixel, hasPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 
 const APP_ID = "sdk_openmt_62266805c2";
 const TRACKED_ROUTE = "tracked";
 const REFRESH_MS = 30_000;
-/** Gmail refetches images whenever it re-renders a thread, so keep reporting the view while it is on screen. */
-const VIEW_HEARTBEAT_MS = 10_000;
 const log = (...args: unknown[]) => console.log("[open-mailtrack]", ...args);
 
 async function main() {
@@ -83,8 +81,13 @@ async function main() {
     const messageId = await message.getMessageIDAsync();
     const reportView = () => api.view(messageId).catch((err) => log(err));
     reportView();
-    const heartbeat = setInterval(() => document.visibilityState === "visible" && reportView(), VIEW_HEARTBEAT_MS);
-    message.on("destroy", () => clearInterval(heartbeat));
+    // Gmail reloads a message's images whenever it re-renders the thread (send completing, new mail,
+    // label changes). Report a view each time our pixel is inserted so those fetches stay classified as ours.
+    const observer = new MutationObserver((records) => {
+      if (records.some((r) => [...r.addedNodes].some((n) => n instanceof Element && hasPixel(n, settings.serverUrl)))) reportView();
+    });
+    observer.observe(message.getElement(), { childList: true, subtree: true });
+    message.on("destroy", () => observer.disconnect());
 
     let current: HTMLElement | null = null;
     const stop = Kefir.fromEvents<void, unknown>(message, "destroy");

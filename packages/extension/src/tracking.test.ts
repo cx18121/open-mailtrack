@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { newId, pixelBlockRule, pixelUrl, removePixels } from "./tracking.js";
+import { hasPixel, newId, pixelBlockRule, pixelUrl, removePixels } from "./tracking.js";
 
 describe("tracking", () => {
   it("makes 22 char base64url ids the server accepts", () => {
@@ -19,6 +19,15 @@ describe("tracking", () => {
     removePixels(div, "https://t.example.com");
     const srcs = [...div.querySelectorAll("img")].map((i) => i.src);
     expect(srcs).toEqual(["https://cdn.example.org/logo.png"]);
+  });
+
+  it("recognises our pixel inside inserted nodes, direct or proxied", () => {
+    const wrap = document.createElement("div");
+    wrap.innerHTML = `<div><img src="https://ci3.googleusercontent.com/meips/X=s0-d-e1-ft#https://t.example.com/p/abc.gif"></div>`;
+    expect(hasPixel(wrap, "https://t.example.com")).toBe(true);
+    const other = document.createElement("img");
+    other.src = "https://cdn.example.org/logo.png";
+    expect(hasPixel(other, "https://t.example.com")).toBe(false);
   });
 
   it("blocks only pixel images loaded from gmail", () => {

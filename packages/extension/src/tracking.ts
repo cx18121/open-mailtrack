@@ -20,11 +20,21 @@ export function createPixel(doc: Document, serverUrl: string, id: string) {
   return img;
 }
 
+const isPixel = (img: HTMLImageElement, marker: string) =>
+  img.hasAttribute(PIXEL_ATTR) || (img.getAttribute("src") ?? "").includes(marker);
+
+/** True when the element is, or contains, one of our pixels, directly or through Gmail's image proxy. */
+export function hasPixel(el: Element, serverUrl: string) {
+  const marker = `${new URL(serverUrl).hostname}/p/`;
+  if (el instanceof HTMLImageElement) return isPixel(el, marker);
+  return [...el.querySelectorAll("img")].some((img) => isPixel(img, marker));
+}
+
 /** Removes our pixels, including ones quoted from earlier messages via Gmail's image proxy. */
 export function removePixels(root: ParentNode, serverUrl: string) {
   const marker = `${new URL(serverUrl).hostname}/p/`;
   root.querySelectorAll("img").forEach((img) => {
-    if (img.hasAttribute(PIXEL_ATTR) || img.getAttribute("src")?.includes(marker)) img.remove();
+    if (isPixel(img, marker)) img.remove();
   });
 }
 
