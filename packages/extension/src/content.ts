@@ -1,10 +1,9 @@
 import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
-import { createApi, createStatusBatcher, type ThreadSummary, type TrackedMessage } from "./api.js";
+import { createApi, createStatusBatcher, type ThreadSummary } from "./api.js";
 import { rowImage, statusElement } from "./marks.js";
-import { expandOperator, OPERATORS } from "./search.js";
-import { trackedPage, type TrackedState } from "./tracked.js";
-import { loadSettings, loadTrackedState, saveTrackedState } from "./settings.js";
+import { trackedList } from "./tracked.js";
+import { loadSettings } from "./settings.js";
 import { createPixel, hasPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
 
 const APP_ID = "sdk_openmt_62266805c2";
@@ -77,15 +76,6 @@ async function main() {
     });
   });
 
-  // Replies are learned when you view the thread: any rendered message from someone else marks the tracked
-  // messages sent before it as replied. The server ignores threads it does not track.
-  sdk.Conversations.registerMessageViewHandler(async (message) => {
-    if (message.getSender().emailAddress.toLowerCase() === me) return;
-    const threadId = await message.getThreadView().getThreadIDAsync();
-    const parsed = Date.parse(message.getDateString());
-    api.replied(threadId, Number.isNaN(parsed) ? Date.now() : parsed).catch((err) => log(err));
-  });
-
   sdk.Conversations.registerMessageViewHandler(async (message) => {
     if (message.getSender().emailAddress.toLowerCase() !== me) return;
     const messageId = await message.getMessageIDAsync();
@@ -125,7 +115,7 @@ async function main() {
     row.addImage(image);
   });
 
-  sdk.Router.handleCustomRoute(TRACKED_ROUTE, async (route) => {
+  sdk.Router.handleCustomRoute(TRACKED_ROUTE, (route) => {
     const el = route.getElement();
     const doc = el.ownerDocument;
     const note = (text: string) => {
@@ -137,27 +127,13 @@ async function main() {
     note("Loading…");
 
     let alive = true;
-    let state: TrackedState = await loadTrackedState();
-    let messages: TrackedMessage[] = [];
-    const draw = () =>
-      el.replaceChildren(
-        trackedPage(
-          doc,
-          messages,
-          state,
-          (next) => {
-            state = next;
-            void saveTrackedState(next);
-            draw();
-          },
-          (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId }),
-        ),
-      );
     const render = async () => {
       try {
-        ({ messages } = await api.list(0, 500));
+        const { messages } = await api.list(0, 200);
         if (!alive) return;
-        draw();
+        el.replaceChildren(
+          trackedList(doc, messages, (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId })),
+        );
       } catch (err) {
         log("tracked list failed", err);
         if (alive) note("Could not load tracked messages.");
@@ -170,13 +146,6 @@ async function main() {
       clearInterval(timer);
     });
   });
-
-  for (const term of OPERATORS) {
-    sdk.Search.registerSearchQueryRewriter({
-      term,
-      termReplacer: async () => expandOperator(term, (await api.list(0, 500)).messages),
-    });
-  }
 
   await addTrackedNavItem(sdk);
 }

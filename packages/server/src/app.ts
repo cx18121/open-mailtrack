@@ -91,12 +91,6 @@ export function createApp(db: Db, config: Config) {
     return c.body(null, 204);
   });
 
-  api.post("/replies", async (c) => {
-    const body = await c.req.json<{ gmailThreadId: string; repliedAt: number }>();
-    if (!body.gmailThreadId || typeof body.repliedAt !== "number") return c.json({ error: "gmailThreadId, repliedAt required" }, 400);
-    return c.json({ updated: db.markReplied(body.gmailThreadId, body.repliedAt) });
-  });
-
   api.get("/status", (c) => {
     const split = (v: string | undefined) => (v ? v.split(",").filter(Boolean).slice(0, 200) : []);
     const messageIds = split(c.req.query("messageIds"));

@@ -131,23 +131,6 @@ describe("pixel", () => {
     expect(page.messages.map((m: { subject: string }) => m.subject)).toEqual(["a"]);
   });
 
-  it("marks messages sent before a reply as replied, keeping the earliest reply", async () => {
-    const app = setup();
-    const { id } = await (
-      await app.request("/api/messages", { method: "POST", headers: auth, body: JSON.stringify({ sender: "me@x.com", recipients: ["a@y.com"], subject: "hi" }) })
-    ).json();
-    await app.request(`/api/messages/${id}`, { method: "PATCH", headers: auth, body: JSON.stringify({ gmailMessageId: "gm1", gmailThreadId: "gt1" }) });
-    const sentAt = (await (await app.request(`/api/messages/${id}`, { headers: auth })).json()).sent_at;
-
-    const before = await (await app.request("/api/replies", { method: "POST", headers: auth, body: JSON.stringify({ gmailThreadId: "gt1", repliedAt: sentAt - 1000 }) })).json();
-    expect(before.updated).toBe(0);
-    const later = await (await app.request("/api/replies", { method: "POST", headers: auth, body: JSON.stringify({ gmailThreadId: "gt1", repliedAt: sentAt + 5000 }) })).json();
-    expect(later.updated).toBe(1);
-    await app.request("/api/replies", { method: "POST", headers: auth, body: JSON.stringify({ gmailThreadId: "gt1", repliedAt: sentAt + 2000 }) });
-    const detail = await (await app.request(`/api/messages/${id}`, { headers: auth })).json();
-    expect(detail.replied_at).toBe(sentAt + 2000);
-  });
-
   it("rejects api calls without the key", async () => {
     const app = setup();
     expect((await app.request("/api/messages")).status).toBe(401);

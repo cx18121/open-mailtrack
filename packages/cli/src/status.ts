@@ -11,7 +11,6 @@ export type TrackedMessage = {
   created_at: number;
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
-  replied_at: number | null;
   opens: number;
   firstOpenAt: number | null;
   lastOpenAt: number | null;
@@ -40,8 +39,7 @@ export function formatTable(messages: TrackedMessage[], now = Date.now()): strin
   const rows = messages.map((m) => {
     const opened = m.opens === 0 ? "-" : m.opens === 1 ? `opened ${ago(m.lastOpenAt!, now)}` : `opened ${m.opens}x, last ${ago(m.lastOpenAt!, now)}`;
     const late = !m.late ? "" : m.late.kind === "after_send" ? `${m.late.days}d after send` : `reopened after ${m.late.days}d`;
-    const replied = m.replied_at === null ? "" : `replied ${ago(m.replied_at, now)}`;
-    return [m.recipients.join(","), m.subject, `sent ${ago(m.sent_at ?? m.created_at, now)}`, opened, replied || late];
+    return [m.recipients.join(","), m.subject, `sent ${ago(m.sent_at ?? m.created_at, now)}`, opened, late];
   });
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
   return rows.map((r) => r.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
@@ -63,15 +61,11 @@ export async function status(argv: string[]) {
       since: { type: "string" },
       opened: { type: "boolean", default: false },
       unopened: { type: "boolean", default: false },
-      replied: { type: "boolean", default: false },
-      "no-reply": { type: "boolean", default: false },
     },
   });
   const config = readConfig();
   let messages = await fetchStatus(config, values.since ? parseDuration(values.since) : null);
   if (values.opened) messages = messages.filter((m) => m.opens > 0);
   if (values.unopened) messages = messages.filter((m) => m.opens === 0);
-  if (values.replied) messages = messages.filter((m) => m.replied_at !== null);
-  if (values["no-reply"]) messages = messages.filter((m) => m.replied_at === null);
   console.log(values.json ? JSON.stringify(messages, null, 2) : formatTable(messages));
 }

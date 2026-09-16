@@ -10,7 +10,6 @@ export type Message = {
   sent_at: number | null;
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
-  replied_at: number | null;
 };
 
 export type Hit = {
@@ -55,8 +54,6 @@ create index if not exists message_views_message on message_views (gmail_message
 drop table if exists self_views;
 `;
 
-const migrations = [`alter table messages add column replied_at integer`];
-
 type MessageRow = Omit<Message, "recipients"> & { recipients: string };
 type HitRow = Omit<Hit, "headers"> & { headers: string };
 
@@ -67,11 +64,6 @@ export function openDb(path: string) {
   const db = new DatabaseSync(path);
   db.exec("pragma journal_mode = wal");
   db.exec(schema);
-  for (const m of migrations) {
-    try {
-      db.exec(m);
-    } catch {}
-  }
 
   const insertMessage = db.prepare(
     `insert into messages (id, sender, recipients, subject, source, created_at)
@@ -81,9 +73,6 @@ export function openDb(path: string) {
     `update messages set sent_at = ?, gmail_message_id = ?, gmail_thread_id = ? where id = ?`,
   );
   const selectMessage = db.prepare(`select * from messages where id = ?`);
-  const updateReplied = db.prepare(
-    `update messages set replied_at = ? where gmail_thread_id = ? and sent_at is not null and sent_at < ? and (replied_at is null or replied_at > ?)`,
-  );
   const selectMessages = db.prepare(`select * from messages order by created_at desc`);
   const insertHit = db.prepare(
     `insert into hits (message_id, at, ip, user_agent, headers) values (?, ?, ?, ?, ?)`,
@@ -102,10 +91,6 @@ export function openDb(path: string) {
     },
     markSent(id: string, gmail: { messageId: string; threadId: string }) {
       return updateSent.run(Date.now(), gmail.messageId, gmail.threadId, id).changes > 0;
-    },
-    /** Records the earliest known reply time on every tracked message in the thread sent before it. */
-    markReplied(gmailThreadId: string, repliedAt: number) {
-      return updateReplied.run(repliedAt, gmailThreadId, repliedAt, repliedAt).changes;
     },
     getMessage(id: string) {
       const row = selectMessage.get(id) as MessageRow | undefined;
