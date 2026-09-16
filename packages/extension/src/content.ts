@@ -110,24 +110,61 @@ async function main() {
 
   sdk.Router.handleCustomRoute(TRACKED_ROUTE, (route) => {
     const el = route.getElement();
-    const stop = Kefir.fromEvents<void, unknown>(route, "destroy");
-    ticks
-      .takeUntilBy(stop)
-      .flatMapLatest(() => Kefir.fromPromise(api.list(0, 200)))
-      .onValue(({ messages }) => {
+    const doc = el.ownerDocument;
+    const note = (text: string) => {
+      const p = doc.createElement("p");
+      p.className = "omt-tracked-empty";
+      p.textContent = text;
+      el.replaceChildren(p);
+    };
+    note("Loading…");
+
+    let alive = true;
+    const render = async () => {
+      try {
+        const { messages } = await api.list(0, 200);
+        if (!alive) return;
         el.replaceChildren(
-          trackedList(el.ownerDocument, messages, (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId })),
+          trackedList(doc, messages, (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId })),
         );
-      })
-      .onError((err) => log(err));
+      } catch (err) {
+        log("tracked list failed", err);
+        if (alive) note("Could not load tracked messages.");
+      }
+    };
+    void render();
+    const timer = setInterval(() => document.visibilityState === "visible" && render(), REFRESH_MS);
+    route.on("destroy", () => {
+      alive = false;
+      clearInterval(timer);
+    });
   });
 
-  sdk.NavMenu.addNavItem({
+  await addTrackedNavItem(sdk);
+}
+
+/**
+ * InboxSDK attaches nav items to Gmail's `.aeN` sidebar and gives up with "should not happen"
+ * when it is not rendered yet, which happens on soft reloads. Wait for it and verify the item landed.
+ */
+async function addTrackedNavItem(sdk: InboxSDK.InboxSDK) {
+  const descriptor = {
     name: "Tracked",
     iconUrl: chrome.runtime.getURL("icons/opened.svg"),
     routeID: TRACKED_ROUTE,
     orderHint: 0,
-  });
+  };
+  const sidebarReady = () => document.querySelector(".aeN[role=navigation], .aeN [role=navigation]");
+  for (let attempt = 0; attempt < 20; attempt++) {
+    if (sidebarReady()) {
+      sdk.NavMenu.addNavItem(descriptor);
+      await new Promise((r) => setTimeout(r, 1000));
+      if ([...document.querySelectorAll(".inboxsdk__navItem_name")].some((el) => el.textContent === "Tracked")) return;
+      log("nav item did not attach, retrying");
+    }
+    await new Promise((r) => setTimeout(r, 500));
+  }
+  log("gave up adding the Tracked nav item");
 }
 
 main().catch((err) => log(err));
