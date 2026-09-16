@@ -16,7 +16,7 @@ const usage = `openmt <command>
          Every file in ./files is attached to every email.
          --input <file> [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
   status Tracked messages, most recently opened first
-         [--since 7d] [--opened | --unopened] [--json]
+         [--since 7d] [--opened | --unopened] [--sender you@gmail.com] [--json]
 `;
 
 async function auth(argv: string[]) {

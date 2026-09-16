@@ -34,8 +34,8 @@ export function createApi(settings: Settings) {
       const q = new URLSearchParams({ messageIds: messageIds.join(","), threadIds: threadIds.join(",") });
       return (await call(`/status?${q}`, "GET")).json();
     },
-    list: async (offset: number, limit: number): Promise<{ total: number; messages: TrackedMessage[] }> => {
-      const q = new URLSearchParams({ offset: String(offset), limit: String(limit) });
+    list: async (sender: string, offset: number, limit: number): Promise<{ total: number; messages: TrackedMessage[] }> => {
+      const q = new URLSearchParams({ sender, offset: String(offset), limit: String(limit) });
       return (await call(`/messages?${q}`, "GET")).json();
     },
   };

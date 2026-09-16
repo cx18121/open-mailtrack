@@ -113,15 +113,18 @@ export function createApp(db: Db, config: Config) {
 
   /**
    * Tracked messages with their open summary, most recently opened first, then unopened by send time.
-   * `since` limits to messages sent or opened after that time. `offset`/`limit` page the result.
+   * `since` limits to messages sent or opened after that time. `sender` limits to one sending address.
+   * `offset`/`limit` page the result.
    */
   api.get("/messages", (c) => {
     const since = Number(c.req.query("since") ?? 0);
+    const sender = c.req.query("sender")?.toLowerCase();
     const offset = Number(c.req.query("offset") ?? 0);
     const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
     const all = db
       .listMessages()
       .map((m) => ({ ...m, ...summaryOf(m), hits: db.listHits(m.id).length }))
+      .filter((m) => !sender || m.sender.toLowerCase() === sender)
       .filter((m) => (m.sent_at ?? m.created_at) >= since || (m.lastOpenAt ?? 0) >= since)
       .sort((a, b) => (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0) || (b.sent_at ?? b.created_at) - (a.sent_at ?? a.created_at));
     return c.json({ total: all.length, messages: all.slice(offset, offset + limit) });

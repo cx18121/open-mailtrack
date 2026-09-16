@@ -45,9 +45,10 @@ export function formatTable(messages: TrackedMessage[], now = Date.now()): strin
   return rows.map((r) => r.map((c, i) => c.padEnd(widths[i])).join("  ").trimEnd()).join("\n");
 }
 
-export async function fetchStatus(config: Config, sinceMs: number | null): Promise<TrackedMessage[]> {
+export async function fetchStatus(config: Config, sinceMs: number | null, sender?: string): Promise<TrackedMessage[]> {
   const q = new URLSearchParams({ limit: "500" });
   if (sinceMs !== null) q.set("since", String(Date.now() - sinceMs));
+  if (sender) q.set("sender", sender);
   const res = await fetch(`${config.serverUrl}/api/messages?${q}`, { headers: { authorization: `Bearer ${config.apiKey}` } });
   if (!res.ok) throw new Error(`Tracker /messages failed: HTTP ${res.status} ${await res.text()}`);
   return ((await res.json()) as { messages: TrackedMessage[] }).messages;
@@ -61,10 +62,11 @@ export async function status(argv: string[]) {
       since: { type: "string" },
       opened: { type: "boolean", default: false },
       unopened: { type: "boolean", default: false },
+      sender: { type: "string" },
     },
   });
   const config = readConfig();
-  let messages = await fetchStatus(config, values.since ? parseDuration(values.since) : null);
+  let messages = await fetchStatus(config, values.since ? parseDuration(values.since) : null, values.sender);
   if (values.opened) messages = messages.filter((m) => m.opens > 0);
   if (values.unopened) messages = messages.filter((m) => m.opens === 0);
   console.log(values.json ? JSON.stringify(messages, null, 2) : formatTable(messages));

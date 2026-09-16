@@ -129,6 +129,10 @@ describe("pixel", () => {
     expect(list.messages.map((m: { subject: string }) => m.subject)).toEqual(["c", "a", "b"]);
     const page = await (await app.request("/api/messages?offset=1&limit=1", { headers: auth })).json();
     expect(page.messages.map((m: { subject: string }) => m.subject)).toEqual(["a"]);
+    const mine = await (await app.request("/api/messages?sender=ME@x.com", { headers: auth })).json();
+    expect(mine.total).toBe(3);
+    const none = await (await app.request("/api/messages?sender=other@x.com", { headers: auth })).json();
+    expect(none.total).toBe(0);
   });
 
   it("rejects api calls without the key", async () => {

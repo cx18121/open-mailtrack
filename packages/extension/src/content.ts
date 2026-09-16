@@ -145,7 +145,7 @@ async function main() {
       );
     const render = async () => {
       try {
-        ({ messages } = await api.list(0, 500));
+        ({ messages } = await api.list(me, 0, 500));
         if (!alive) return;
         draw();
       } catch (err) {
@@ -164,7 +164,7 @@ async function main() {
   for (const term of OPERATORS) {
     sdk.Search.registerSearchQueryRewriter({
       term,
-      termReplacer: async () => expandOperator(term, (await api.list(0, 500)).messages),
+      termReplacer: async () => expandOperator(term, (await api.list(me, 0, 500)).messages),
     });
   }
 
