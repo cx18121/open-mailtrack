@@ -16,10 +16,12 @@ export function createApp(db: Db, config: Config) {
 
   const classified = (m: Message) => {
     const views = m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
-    const threadSentAts = (m.gmail_thread_id ? db.findByGmailThreadIds([m.gmail_thread_id]) : [m])
-      .map((t) => t.sent_at)
-      .filter((t): t is number => t !== null);
-    return db.listHits(m.id).map((h) => classifyHit(h, views, threadSentAts));
+    const siblings = (m.gmail_thread_id ? db.findByGmailThreadIds([m.gmail_thread_id]) : [m]).filter((t) => t.id !== m.id);
+    const thread = {
+      sentAts: [m, ...siblings].map((t) => t.sent_at).filter((t): t is number => t !== null),
+      otherHitAts: siblings.flatMap((t) => db.listHits(t.id).map((h) => h.at)),
+    };
+    return db.listHits(m.id).map((h) => classifyHit(h, views, thread));
   };
   const summaryOf = (m: Message) => summarize(classified(m), m.sent_at);
 

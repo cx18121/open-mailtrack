@@ -1,4 +1,4 @@
-export const CLASSIFIER_VERSION = 3;
+export const CLASSIFIER_VERSION = 4;
 
 export type HitKind = "open" | "self_view" | "prefetch";
 
@@ -7,28 +7,43 @@ export type ClassifiedHit = { at: number; kind: HitKind; reason: string };
 const SELF_VIEW_BEFORE_MS = 5_000;
 const SELF_VIEW_AFTER_MS = 15_000;
 const DEDUPE_MS = 10_000;
-const DELIVERY_SCAN_MS = 30_000;
+const SCAN_AFTER_SEND_MS = 60_000;
+const SCAN_CLUSTER_MS = 2_000;
 const GOOGLE_PROXY = /GoogleImageProxy/;
+
+export type ThreadContext = {
+  /** Send times of every tracked message in the thread, this one included. */
+  sentAts: number[];
+  /** Hit times on the *other* tracked messages in the thread. */
+  otherHitAts: number[];
+};
 
 /**
  * Rules come from recorded traffic. Gmail and Workspace recipients fetch through GoogleImageProxy.
  * The sender's own views land within milliseconds of the extension's view signal. When a reply lands
- * in a thread the recipient already viewed, Gmail fetches the images of every message in that thread
- * about 17 s after send with nobody looking; new threads showed no such fetch. A browser can fetch
- * twice per render.
- *
- * `threadSentAts` are the send times of every tracked message in the same thread, this one included.
+ * in a thread the recipient already viewed, Gmail refetches the images of every message in that
+ * thread at once, about 17 s after the send, with nobody looking. That scan is recognised by its
+ * shape: a Google proxy hit here plus a hit on another tracked message in the same thread within a
+ * couple of seconds, shortly after a send. Fresh single-message threads showed no scan, so a lone
+ * hit is always an open. A browser can fetch twice per render.
  */
 export function classifyHit(
   hit: { at: number; user_agent: string | null },
   selfViewsAt: number[],
-  threadSentAts: number[] = [],
+  thread: ThreadContext = { sentAts: [], otherHitAts: [] },
 ): ClassifiedHit {
   const nearView = selfViewsAt.find((v) => hit.at >= v - SELF_VIEW_BEFORE_MS && hit.at <= v + SELF_VIEW_AFTER_MS);
   if (nearView !== undefined) return { at: hit.at, kind: "self_view", reason: `sender viewed message at ${nearView}` };
-  const recentSend = threadSentAts.find((t) => hit.at >= t && hit.at - t <= DELIVERY_SCAN_MS);
-  if (recentSend !== undefined && GOOGLE_PROXY.test(hit.user_agent ?? "")) {
-    return { at: hit.at, kind: "prefetch", reason: `google proxy fetch ${Math.round((hit.at - recentSend) / 1000)}s after a send in this thread` };
+  if (GOOGLE_PROXY.test(hit.user_agent ?? "")) {
+    const recentSend = thread.sentAts.find((t) => hit.at >= t && hit.at - t <= SCAN_AFTER_SEND_MS);
+    const sibling = thread.otherHitAts.find((t) => Math.abs(t - hit.at) <= SCAN_CLUSTER_MS);
+    if (recentSend !== undefined && sibling !== undefined) {
+      return {
+        at: hit.at,
+        kind: "prefetch",
+        reason: `thread-wide google proxy refetch ${Math.round((hit.at - recentSend) / 1000)}s after a send in this thread`,
+      };
+    }
   }
   return { at: hit.at, kind: "open", reason: "no exclusion matched" };
 }
