@@ -31,9 +31,16 @@ describe("classifyHit", () => {
     expect(classifyHit(hit(scanAt + 120), [], { sentAts: [original, reply], otherHitAts: [scanAt] }).kind).toBe("prefetch");
   });
 
-  it("keeps a lone hit as an open even right after a send, so single-message threads never lose a first open", () => {
+  it("keeps a lone hit as an open right after a send on a fresh single-message thread", () => {
     const sentAt = 1789533183570;
     expect(classifyHit(hit(sentAt + 16_531), [], { sentAts: [sentAt], otherHitAts: [] }).kind).toBe("open");
+  });
+
+  it("treats a lone fetch of a reply into an existing thread as the scan (04:33:20)", () => {
+    const original = 1789499669079;
+    const reply = 1789533183570;
+    expect(classifyHit(hit(reply + 16_531), [], { sentAts: [original, reply], otherHitAts: [] }).kind).toBe("prefetch");
+    expect(classifyHit(hit(reply + 45_000), [], { sentAts: [original, reply], otherHitAts: [] }).kind).toBe("open");
   });
 
   it("keeps a cluster as opens when it is not close to a send", () => {

@@ -7,7 +7,7 @@ export type ClassifiedHit = { at: number; kind: HitKind; reason: string };
 const SELF_VIEW_BEFORE_MS = 5_000;
 const SELF_VIEW_AFTER_MS = 15_000;
 const DEDUPE_MS = 10_000;
-const SCAN_AFTER_SEND_MS = 60_000;
+const SCAN_AFTER_SEND_MS = 30_000;
 const SCAN_CLUSTER_MS = 2_000;
 const GOOGLE_PROXY = /GoogleImageProxy/;
 
@@ -22,10 +22,11 @@ export type ThreadContext = {
  * Rules come from recorded traffic. Gmail and Workspace recipients fetch through GoogleImageProxy.
  * The sender's own views land within milliseconds of the extension's view signal. When a reply lands
  * in a thread the recipient already viewed, Gmail refetches the images of every message in that
- * thread at once, about 17 s after the send, with nobody looking. That scan is recognised by its
- * shape: a Google proxy hit here plus a hit on another tracked message in the same thread within a
- * couple of seconds, shortly after a send. Fresh single-message threads showed no scan, so a lone
- * hit is always an open. A browser can fetch twice per render.
+ * thread, about 17 s after the send, with nobody looking. Observed twice as a same-second cluster
+ * across the thread and once as a lone fetch of the new reply only. Fresh single-message threads
+ * showed no scan at all. So: within 30 s of a send into a thread that already had tracked mail, a
+ * Google proxy hit is the scan, whether or not siblings were refetched; a cluster of hits across the
+ * thread just after a send is the scan even outside that window. A browser can fetch twice per render.
  */
 export function classifyHit(
   hit: { at: number; user_agent: string | null },
@@ -34,15 +35,15 @@ export function classifyHit(
 ): ClassifiedHit {
   const nearView = selfViewsAt.find((v) => hit.at >= v - SELF_VIEW_BEFORE_MS && hit.at <= v + SELF_VIEW_AFTER_MS);
   if (nearView !== undefined) return { at: hit.at, kind: "self_view", reason: `sender viewed message at ${nearView}` };
-  if (GOOGLE_PROXY.test(hit.user_agent ?? "")) {
+  if (GOOGLE_PROXY.test(hit.user_agent ?? "") && thread.sentAts.length > 1) {
     const recentSend = thread.sentAts.find((t) => hit.at >= t && hit.at - t <= SCAN_AFTER_SEND_MS);
+    if (recentSend !== undefined) {
+      return { at: hit.at, kind: "prefetch", reason: `google proxy refetch ${Math.round((hit.at - recentSend) / 1000)}s after a send into this thread` };
+    }
     const sibling = thread.otherHitAts.find((t) => Math.abs(t - hit.at) <= SCAN_CLUSTER_MS);
-    if (recentSend !== undefined && sibling !== undefined) {
-      return {
-        at: hit.at,
-        kind: "prefetch",
-        reason: `thread-wide google proxy refetch ${Math.round((hit.at - recentSend) / 1000)}s after a send in this thread`,
-      };
+    const clusterSend = thread.sentAts.find((t) => hit.at >= t && hit.at - t <= 2 * SCAN_AFTER_SEND_MS);
+    if (sibling !== undefined && clusterSend !== undefined) {
+      return { at: hit.at, kind: "prefetch", reason: `thread-wide google proxy refetch ${Math.round((hit.at - clusterSend) / 1000)}s after a send into this thread` };
     }
   }
   return { at: hit.at, kind: "open", reason: "no exclusion matched" };
