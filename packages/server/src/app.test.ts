@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApp } from "./app.js";
 import { openDb } from "./db.js";
 
@@ -9,6 +9,10 @@ function setup() {
   const db = openDb(":memory:");
   return createApp(db, config);
 }
+
+afterEach(() => vi.restoreAllMocks());
+
+const PREFETCH = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
 
 describe("pixel", () => {
   it("registers a message and records a hit with request evidence", async () => {
@@ -82,6 +86,49 @@ describe("pixel", () => {
     const status = await (await app.request("/api/status?messageIds=gm1,unknown&threadIds=gt1", { headers: auth })).json();
     expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null } });
     expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 0 });
+  });
+
+  it.each([
+    { sentAt: 1791304670944, delta: 376, ua: "GoogleImageProxy" },
+    { sentAt: 1790620079541, delta: 12_266, ua: PREFETCH },
+  ])("excludes a recorded automated fetch with no sender view ($delta ms)", async ({ sentAt, delta, ua }) => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(sentAt - 500);
+    const app = setup();
+    const { id } = await (await app.request("/api/messages", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ sender: "me@x.com", recipients: ["a@y.com"], subject: "hi", source: "extension" }),
+    })).json();
+    now.mockReturnValue(sentAt);
+    expect((await app.request(`/api/messages/${id}`, {
+      method: "PATCH", headers: auth,
+      body: JSON.stringify({ gmailMessageId: "gm1", gmailThreadId: "gt1" }),
+    })).status).toBe(204);
+    now.mockReturnValue(sentAt + delta);
+    expect((await app.request(`/p/${id}.gif`, { headers: { "user-agent": ua } })).status).toBe(200);
+
+    const detail = async () => (await app.request(`/api/messages/${id}`, { headers: auth })).json();
+    const list = async () => (await app.request("/api/messages", { headers: auth })).json();
+    const status = async () => (await app.request("/api/status?messageIds=gm1&threadIds=gt1", { headers: auth })).json();
+    const excluded = await detail();
+    expect(excluded.views).toEqual([]);
+    expect(excluded.hits).toHaveLength(1);
+    expect(excluded.hits[0]).toMatchObject({ at: sentAt + delta, user_agent: ua, kind: "prefetch" });
+    expect(excluded).toMatchObject({ opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [] });
+    expect((await list()).messages[0]).toMatchObject({ opens: 0, hits: 1 });
+    const unopened = await status();
+    expect(unopened.messages.gm1.opens).toBe(0);
+    expect(unopened.threads.gt1).toMatchObject({ tracked: 1, opens: 0, lastOpenAt: null });
+
+    // A later fetch still produces an opened status without deleting the excluded evidence.
+    const openAt = sentAt + 127_896;
+    now.mockReturnValue(openAt);
+    await app.request(`/p/${id}.gif`, { headers: { "user-agent": "GoogleImageProxy" } });
+    expect(await detail()).toMatchObject({ opens: 1, firstOpenAt: openAt, lastOpenAt: openAt, openAts: [openAt] });
+    expect((await list()).messages[0]).toMatchObject({ opens: 1, hits: 2 });
+    const opened = await status();
+    expect(opened.classifierVersion).toBe(5);
+    expect(opened.messages.gm1.opens).toBe(1);
+    expect(opened.threads.gt1).toMatchObject({ tracked: 1, opens: 1, lastOpenAt: openAt });
   });
 
   it("answers cors preflight for the api", async () => {

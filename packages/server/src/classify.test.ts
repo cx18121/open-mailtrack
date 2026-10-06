@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { classifyHit, summarize } from "./classify.js";
 
 const PROXY = "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)";
+const PREFETCH = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
 const hit = (at: number) => ({ at, user_agent: PROXY });
 
 describe("classifyHit", () => {
@@ -31,9 +32,37 @@ describe("classifyHit", () => {
     expect(classifyHit(hit(scanAt + 120), [], { sentAts: [original, reply], otherHitAts: [scanAt] }).kind).toBe("prefetch");
   });
 
-  it("keeps a lone hit as an open right after a send on a fresh single-message thread", () => {
-    const sentAt = 1789533183570;
-    expect(classifyHit(hit(sentAt + 16_531), [], { sentAts: [sentAt], otherHitAts: [] }).kind).toBe("open");
+  it.each([
+    [-1, "open"],
+    [0, "prefetch"],
+    [376, "prefetch"],
+    [15_619, "prefetch"],
+    [30_000, "prefetch"],
+    [30_001, "open"],
+  ] as const)("classifies a lone proxy fetch %ims after send as %s", (delta, kind) => {
+    const sentAt = 1791304670944;
+    expect(classifyHit(hit(sentAt + delta), [], { sentAts: [sentAt], otherHitAts: [] }).kind).toBe(kind);
+  });
+
+  it.each([12_266, 3_600_000])("excludes the known Gmail prefetch bot %ims after sending", (delta) => {
+    const sentAt = 1790620079541;
+    expect(classifyHit({ at: sentAt + delta, user_agent: PREFETCH }, [], { sentAts: [sentAt], otherHitAts: [] }).kind).toBe("prefetch");
+  });
+
+  it("recognises the bot without a send timestamp but not a similar browser user agent", () => {
+    expect(classifyHit({ at: 1000, user_agent: PREFETCH }, []).kind).toBe("prefetch");
+    expect(classifyHit({ at: 1000, user_agent: PREFETCH.replace("Chrome/42.0.2311.135", "Chrome/42.0.2311.136") }, []).kind).toBe("open");
+    expect(classifyHit({ at: 1000, user_agent: null }, []).kind).toBe("open");
+    expect(classifyHit(hit(1000), []).kind).toBe("open");
+  });
+
+  it("preserves self-view precedence for the known bot", () => {
+    expect(classifyHit({ at: 1000, user_agent: PREFETCH }, [1000]).kind).toBe("self_view");
+  });
+
+  it("preserves the thread-wide cluster exclusion beyond 30 seconds", () => {
+    const reply = 100_000;
+    expect(classifyHit(hit(reply + 45_000), [], { sentAts: [0, reply], otherHitAts: [reply + 45_100] }).kind).toBe("prefetch");
   });
 
   it("treats a lone fetch of a reply into an existing thread as the scan (04:33:20)", () => {

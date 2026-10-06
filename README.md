@@ -11,6 +11,7 @@ Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 A tracked message carries a 1×1 image on your server so when the recipient's client renders the message, the server records a response. A few notes:
 - Reopening in the same Gmail tab does not refetch, but a new session or device does
 - Your own views on the email are reported by the extension and excluded
+- Gmail's known prefetch bot is excluded. Google image-proxy fetches within 30 seconds of a recorded send are also excluded, even on a new thread. A genuine read during that window may go uncounted
 - Untested with Apple mail and Outlook email client
 
 ## server

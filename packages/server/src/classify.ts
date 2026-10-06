@@ -1,4 +1,4 @@
-export const CLASSIFIER_VERSION = 4;
+export const CLASSIFIER_VERSION = 5;
 
 export type HitKind = "open" | "self_view" | "prefetch";
 
@@ -10,6 +10,9 @@ const DEDUPE_MS = 10_000;
 const SCAN_AFTER_SEND_MS = 30_000;
 const SCAN_CLUSTER_MS = 2_000;
 const GOOGLE_PROXY = /GoogleImageProxy/;
+// Gmail's prefetch bot is distinct from the proxy used for recipient image loads.
+// https://bird.com/en/resources/blog/gmail-prefetching-images
+const GOOGLE_PREFETCH = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
 
 export type ThreadContext = {
   /** Send times of every tracked message in the thread, this one included. */
@@ -19,14 +22,12 @@ export type ThreadContext = {
 };
 
 /**
- * Rules come from recorded traffic. Gmail and Workspace recipients fetch through GoogleImageProxy.
- * The sender's own views land within milliseconds of the extension's view signal. When a reply lands
- * in a thread the recipient already viewed, Gmail refetches the images of every message in that
- * thread, about 17 s after the send, with nobody looking. Observed twice as a same-second cluster
- * across the thread and once as a lone fetch of the new reply only. Fresh single-message threads
- * showed no scan at all. So: within 30 s of a send into a thread that already had tracked mail, a
- * Google proxy hit is the scan, whether or not siblings were refetched; a cluster of hits across the
- * thread just after a send is the scan even outside that window. A browser can fetch twice per render.
+ * Sender views are correlated with the extension's view signal. Gmail's identifiable prefetch bot
+ * is excluded regardless of timing. Recorded single-message threads also receive Google proxy
+ * hits within half a second of sending, without a view signal. We conservatively exclude proxy
+ * hits within 30 s of any send in the thread, accepting that a genuine immediate read may be missed.
+ * Same-second refetches across tracked messages remain excluded up to 60 s after a send.
+ * A browser can fetch twice per render.
  */
 export function classifyHit(
   hit: { at: number; user_agent: string | null },
@@ -35,14 +36,15 @@ export function classifyHit(
 ): ClassifiedHit {
   const nearView = selfViewsAt.find((v) => hit.at >= v - SELF_VIEW_BEFORE_MS && hit.at <= v + SELF_VIEW_AFTER_MS);
   if (nearView !== undefined) return { at: hit.at, kind: "self_view", reason: `sender viewed message at ${nearView}` };
-  if (GOOGLE_PROXY.test(hit.user_agent ?? "") && thread.sentAts.length > 1) {
+  if (hit.user_agent === GOOGLE_PREFETCH) return { at: hit.at, kind: "prefetch", reason: "known gmail prefetch bot" };
+  if (GOOGLE_PROXY.test(hit.user_agent ?? "")) {
     const recentSend = thread.sentAts.find((t) => hit.at >= t && hit.at - t <= SCAN_AFTER_SEND_MS);
     if (recentSend !== undefined) {
-      return { at: hit.at, kind: "prefetch", reason: `google proxy refetch ${Math.round((hit.at - recentSend) / 1000)}s after a send into this thread` };
+      return { at: hit.at, kind: "prefetch", reason: `google proxy fetch ${Math.round((hit.at - recentSend) / 1000)}s after a send in this thread` };
     }
     const sibling = thread.otherHitAts.find((t) => Math.abs(t - hit.at) <= SCAN_CLUSTER_MS);
     const clusterSend = thread.sentAts.find((t) => hit.at >= t && hit.at - t <= 2 * SCAN_AFTER_SEND_MS);
-    if (sibling !== undefined && clusterSend !== undefined) {
+    if (thread.sentAts.length > 1 && sibling !== undefined && clusterSend !== undefined) {
       return { at: hit.at, kind: "prefetch", reason: `thread-wide google proxy refetch ${Math.round((hit.at - clusterSend) / 1000)}s after a send into this thread` };
     }
   }
