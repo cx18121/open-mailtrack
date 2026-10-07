@@ -9,7 +9,7 @@ const options = {
   entryPoints: {
     content: "src/content.ts",
     options: "src/options.ts",
-    background: "node_modules/@inboxsdk/core/background.js",
+    background: "src/background.ts",
     pageWorld: "node_modules/@inboxsdk/core/pageWorld.js",
   },
   bundle: true,

@@ -38,17 +38,26 @@ export function removePixels(root: ParentNode, serverUrl: string) {
   });
 }
 
-/** Chrome blocks the pixel from loading inside Gmail itself so composing never counts as an open. */
+/** Blocks this tracker’s pixels in this browser profile's Gmail, directly or through Google's proxy. */
 export function pixelBlockRule(serverUrl: string): chrome.declarativeNetRequest.Rule {
-  const host = new URL(serverUrl).hostname;
+  const base = new URL(`${serverUrl.replace(/\/$/, "")}/p/`).href.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   return {
     id: 1,
     priority: 1,
     action: { type: "block" },
     condition: {
-      urlFilter: `||${host}/p/`,
+      // Leave ID length validation to the server. Expanding {22} exceeds Chrome's compiled-regex limit.
+      regexFilter: `^(?:https://[a-z0-9-]+\\.googleusercontent\\.com/[^#]*#)?${base}[A-Za-z0-9_-]+\\.gif$`,
+      isUrlFilterCaseSensitive: true,
       initiatorDomains: ["mail.google.com"],
       resourceTypes: ["image"],
     },
   };
+}
+
+export function installPixelBlockRule(serverUrl: string) {
+  return chrome.declarativeNetRequest.updateDynamicRules({
+    removeRuleIds: [1],
+    addRules: [pixelBlockRule(serverUrl)],
+  });
 }

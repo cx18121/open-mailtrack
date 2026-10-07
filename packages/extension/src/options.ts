@@ -1,5 +1,5 @@
 import { loadSettings, saveSettings } from "./settings.js";
-import { pixelBlockRule } from "./tracking.js";
+import { installPixelBlockRule } from "./tracking.js";
 
 const $ = (id: string) => document.getElementById(id) as HTMLInputElement;
 
@@ -19,9 +19,6 @@ $("save").addEventListener("click", async () => {
     return;
   }
   await saveSettings({ serverUrl, apiKey });
-  await chrome.declarativeNetRequest.updateDynamicRules({
-    removeRuleIds: [1],
-    addRules: [pixelBlockRule(serverUrl)],
-  });
+  await installPixelBlockRule(serverUrl);
   $("status").textContent = "Saved";
 });

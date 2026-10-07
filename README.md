@@ -10,7 +10,7 @@ Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
 
 A tracked message carries a 1×1 image on your server so when the recipient's client renders the message, the server records a response. A few notes:
 - Reopening in the same Gmail tab does not refetch, but a new session or device does
-- Your own views on the email are reported by the extension and excluded
+- The extension blocks this server's tracking pixels in Gmail, including Google's proxied URLs, throughout the browser profile where it is installed. Your own views are also reported and excluded as a fallback. A second Gmail account in the same profile is blocked too. Other profiles and devices are unaffected
 - Gmail's known prefetch bot is excluded. Google image-proxy fetches within 30 seconds of a recorded send are also excluded, even on a new thread. A genuine read during that window may go uncounted
 - Untested with Apple mail and Outlook email client
 
@@ -35,6 +35,8 @@ pnpm --filter @open-mailtrack/extension build
 ```
 
 `chrome://extensions` → Developer mode → Load unpacked → `packages/extension/dist`. Enter the server URL and API key in the extension's options, then reload Gmail.
+
+After rebuilding an installed extension, reload it in `chrome://extensions` and reload Gmail. The extension updates its saved pixel-blocking rule automatically. This blocks browser-generated loads, not automatic fetches on the recipient's side.
 
 Tracking is on by default for every send, including replies. There is an option in the compose email toolbar to turn tracking off for a message. Mail addressed only to yourself is never tracked.
 

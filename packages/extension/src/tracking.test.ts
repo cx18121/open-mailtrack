@@ -30,12 +30,35 @@ describe("tracking", () => {
     expect(hasPixel(other, "https://t.example.com")).toBe(false);
   });
 
-  it("blocks only pixel images loaded from gmail", () => {
+  it("blocks direct and Gmail-proxied tracking pixels, but not other images", () => {
     const rule = pixelBlockRule("https://t.example.com");
-    expect(rule.condition).toEqual({
-      urlFilter: "||t.example.com/p/",
-      initiatorDomains: ["mail.google.com"],
-      resourceTypes: ["image"],
-    });
+    expect(rule.condition.initiatorDomains).toEqual(["mail.google.com"]);
+    expect(rule.condition.resourceTypes).toEqual(["image"]);
+    expect(rule.condition.isUrlFilterCaseSensitive).toBe(true);
+    expect(rule.condition.regexFilter).toBeTypeOf("string");
+    const matches = new RegExp(rule.condition.regexFilter!);
+    const pixel = "https://t.example.com/p/abcdefghijklmnopqrstuv.gif";
+    expect(matches.test(pixel)).toBe(true);
+    expect(matches.test(`https://ci3.googleusercontent.com/meips/XYZ=s0-d-e1-ft#${pixel}`)).toBe(true);
+    expect(matches.test(`https://ci4.googleusercontent.com/proxy/XYZ#${pixel}`)).toBe(true);
+    for (const url of [
+      "https://t.example.com/logo.png",
+      "https://ci3.googleusercontent.com/meips/logo#https://cdn.example.org/logo.png",
+      `https://not-google.example/image#${pixel}`,
+      `https://ci3.googleusercontent.com.evil.example/image#${pixel}`,
+      `https://ci3.googleusercontent.com/image?target=${pixel}`,
+      "https://t.example.com.evil.example/p/abcdefghijklmnopqrstuv.gif",
+      "https://t.example.com/p/a.b.gif",
+      "https://t.example.com/p/nested/image.gif",
+      "https://tXexampleYcom/p/abcdefghijklmnopqrstuv.gif",
+    ]) expect(matches.test(url), url).toBe(false);
+  });
+
+  it("normalizes a trailing slash and escapes a configured server path", () => {
+    const matches = new RegExp(pixelBlockRule("https://t.example.com/tracker.v1/").condition.regexFilter!);
+    const pixel = "https://t.example.com/tracker.v1/p/abcdefghijklmnopqrstuv.gif";
+    expect(matches.test(pixel)).toBe(true);
+    expect(matches.test(`https://ci3.googleusercontent.com/meips/X#${pixel}`)).toBe(true);
+    expect(matches.test(pixel.replace("tracker.v1", "trackerXv1"))).toBe(false);
   });
 });
