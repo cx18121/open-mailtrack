@@ -206,7 +206,9 @@ async function main() {
 
 /**
  * InboxSDK attaches nav items to Gmail's `.aeN` sidebar and gives up with "should not happen"
- * when it is not rendered yet, which happens on soft reloads. Wait for it and verify the item landed.
+ * when it is not rendered yet, which happens on soft reloads. InboxSDK first waits for the sidebar,
+ * which can take seconds, so wait for each attempt to settle, and remove a detached item before
+ * retrying so only one Tracked item can exist.
  */
 async function addTrackedNavItem(sdk: InboxSDK.InboxSDK) {
   const descriptor = {
@@ -215,14 +217,20 @@ async function addTrackedNavItem(sdk: InboxSDK.InboxSDK) {
     routeID: TRACKED_ROUTE,
     orderHint: 0,
   };
-  const sidebarReady = () => document.querySelector(".aeN[role=navigation], .aeN [role=navigation]");
   for (let attempt = 0; attempt < 20; attempt++) {
-    if (sidebarReady()) {
-      sdk.NavMenu.addNavItem(descriptor);
-      await new Promise((r) => setTimeout(r, 1000));
-      if ([...document.querySelectorAll(".inboxsdk__navItem_name")].some((el) => el.textContent === "Tracked")) return;
-      log("nav item did not attach, retrying");
+    const item = sdk.NavMenu.addNavItem(descriptor);
+    let element: HTMLElement;
+    try {
+      // Resolves after InboxSDK has tried to attach the item.
+      element = await item.getElement();
+    } catch (err) {
+      item.remove();
+      log("gave up adding the Tracked nav item", err);
+      return;
     }
+    if (element.isConnected) return;
+    item.remove();
+    log("nav item did not attach, retrying");
     await new Promise((r) => setTimeout(r, 500));
   }
   log("gave up adding the Tracked nav item");
