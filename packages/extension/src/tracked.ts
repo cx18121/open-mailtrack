@@ -1,5 +1,5 @@
 import type { TrackedMessage } from "./api.js";
-import { lateText } from "./marks.js";
+import { lateText, openList } from "./marks.js";
 import { messageSearch } from "./link.js";
 import { ago } from "./time.js";
 
@@ -18,13 +18,20 @@ const FILTERS: { key: Filter; label: string }[] = [
   { key: "unopened", label: "Not opened" },
 ];
 
+export type ListState = {
+  filter: Filter;
+  /** IDs of messages whose open times are showing. Kept by the caller so refreshes keep them open. */
+  expanded: ReadonlySet<string>;
+  onFilter: (next: Filter) => void;
+  onOpen: (message: TrackedMessage) => void;
+  onToggle: (id: string) => void;
+};
+
 /** The Tracked page: our own list in Gmail's visual language, sorted by the server (last open first). */
 export function trackedList(
   doc: Document,
   all: TrackedMessage[],
-  filter: Filter,
-  onFilter: (next: Filter) => void,
-  onOpen: (message: TrackedMessage) => void,
+  { filter, expanded, onFilter, onOpen, onToggle }: ListState,
   now = Date.now(),
 ): HTMLElement {
   const root = doc.createElement("div");
@@ -39,6 +46,7 @@ export function trackedList(
     chip.type = "button";
     chip.className = `omt-chip${f.key === filter ? " omt-chip-active" : ""}`;
     chip.setAttribute("role", "tab");
+    chip.dataset.omtFocus = `chip:${f.key}`;
     chip.setAttribute("aria-selected", String(f.key === filter));
     chip.append(f.label);
     const n = doc.createElement("span");
@@ -65,9 +73,16 @@ export function trackedList(
   list.className = "omt-tracked-list";
   list.setAttribute("role", "list");
   for (const m of messages) {
+    const item = doc.createElement("div");
+    item.className = `omt-tracked-item${m.opens > 0 ? " omt-tracked-opened" : ""}`;
+    item.setAttribute("role", "listitem");
+    const head = doc.createElement("div");
+    head.className = "omt-tracked-head";
+    item.append(head);
+
     const row = doc.createElement("a");
-    row.className = `omt-tracked-row${m.opens > 0 ? " omt-tracked-opened" : ""}`;
-    row.setAttribute("role", "listitem");
+    row.className = "omt-tracked-row";
+    row.dataset.omtFocus = `row:${m.id}`;
     row.href = m.gmail_thread_id ? `#all/${encodeURIComponent(m.gmail_thread_id)}` : `#search/${encodeURIComponent(messageSearch(m))}`;
     if (!m.gmail_thread_id) row.title = "Find this sent message in Gmail to restore its tracking marks";
     row.addEventListener("click", (e) => {
@@ -102,7 +117,31 @@ export function trackedList(
       row.append(badge);
     }
     row.append(status);
-    list.append(row);
+    head.append(row);
+
+    if (m.opens > 0) {
+      const open = expanded.has(m.id);
+      const toggle = doc.createElement("button");
+      toggle.type = "button";
+      toggle.className = "omt-tracked-toggle";
+      toggle.dataset.omtFocus = `toggle:${m.id}`;
+      toggle.setAttribute("aria-expanded", String(open));
+      toggle.setAttribute("aria-label", `${open ? "Hide" : "Show"} open times for ${m.subject || "(no subject)"}`);
+      toggle.title = open ? "Hide open times" : "Show open times";
+      toggle.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M7.41 8.59 12 13.17l4.59-4.58L18 10l-6 6-6-6z" fill="currentColor"/></svg>';
+      toggle.addEventListener("click", () => onToggle(m.id));
+      head.append(toggle);
+      if (open) {
+        const times = openList(doc, m.openAts, now);
+        times.classList.add("omt-tracked-opens");
+        item.append(times);
+      }
+    } else {
+      const spacer = doc.createElement("span");
+      spacer.className = "omt-tracked-toggle-space";
+      head.append(spacer);
+    }
+    list.append(item);
   }
   root.append(list);
   return root;

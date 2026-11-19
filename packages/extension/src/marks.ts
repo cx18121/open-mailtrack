@@ -29,8 +29,33 @@ export function rowImage(t: ThreadSummary) {
   return { imageUrl: iconUrl(t.opens > 0), tooltip: rowTooltip(t), orderHint: 0 };
 }
 
+/** Each open's time, oldest first, as shown under "Show all" and in the Tracked tab. */
+export function openList(doc: Document, openAts: number[], now = Date.now()): HTMLUListElement {
+  const list = doc.createElement("ul");
+  list.className = "omt-status-list";
+  for (const t of openAts) {
+    const li = doc.createElement("li");
+    const time = doc.createElement("time");
+    time.dateTime = new Date(t).toISOString();
+    time.textContent = clock(t);
+    const d = doc.createElement("span");
+    d.textContent = day(t, now);
+    li.append(time, d);
+    list.append(li);
+  }
+  return list;
+}
+
+/** Whether the open list is showing. Kept by the caller so a refreshed line keeps it. */
+export type Expansion = { expanded: boolean; onToggle: (expanded: boolean) => void };
+
 /** The always-visible status line placed above a sent message's body. */
-export function statusElement(doc: Document, s: OpenSummary, now = Date.now()): HTMLElement {
+export function statusElement(
+  doc: Document,
+  s: OpenSummary,
+  now = Date.now(),
+  expansion: Expansion = { expanded: false, onToggle: () => {} },
+): HTMLElement {
   const opened = s.opens > 0;
   const root = doc.createElement("div");
   root.className = "omt-status";
@@ -59,28 +84,19 @@ export function statusElement(doc: Document, s: OpenSummary, now = Date.now()): 
   root.append(line);
 
   if (s.opens > 1) {
-    const list = doc.createElement("ul");
-    list.className = "omt-status-list";
-    list.hidden = true;
-    for (const t of s.openAts) {
-      const li = doc.createElement("li");
-      const time = doc.createElement("time");
-      time.dateTime = new Date(t).toISOString();
-      time.textContent = clock(t);
-      const d = doc.createElement("span");
-      d.textContent = day(t, now);
-      li.append(time, d);
-      list.append(li);
-    }
+    const list = openList(doc, s.openAts, now);
     const toggle = doc.createElement("button");
     toggle.type = "button";
     toggle.className = "omt-status-toggle";
-    toggle.textContent = "Show all";
-    toggle.setAttribute("aria-expanded", "false");
+    const show = (expanded: boolean) => {
+      list.hidden = !expanded;
+      toggle.textContent = expanded ? "Hide" : "Show all";
+      toggle.setAttribute("aria-expanded", String(expanded));
+    };
+    show(expansion.expanded);
     toggle.addEventListener("click", () => {
-      list.hidden = !list.hidden;
-      toggle.textContent = list.hidden ? "Show all" : "Hide";
-      toggle.setAttribute("aria-expanded", String(!list.hidden));
+      show(list.hidden);
+      expansion.onToggle(!list.hidden);
     });
     line.append(toggle);
     root.append(list);

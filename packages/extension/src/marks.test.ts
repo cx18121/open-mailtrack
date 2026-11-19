@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenSummary } from "./api.js";
 import { rowTooltip, statusElement, summaryText } from "./marks.js";
 
@@ -63,6 +63,14 @@ describe("statusElement", () => {
     const none = statusElement(document, opened(), now);
     expect(none.querySelector("img")!.src).toContain("sent.svg");
     expect(none.textContent).toBe("Not opened yet");
+  });
+
+  it("opens the list as the caller last left it and reports toggles", () => {
+    const onToggle = vi.fn();
+    const el = statusElement(document, opened(h(3), h(1)), now, { expanded: true, onToggle });
+    expect(el.querySelector<HTMLUListElement>(".omt-status-list")!.hidden).toBe(false);
+    el.querySelector<HTMLButtonElement>(".omt-status-toggle")!.click();
+    expect(onToggle).toHaveBeenCalledWith(false);
   });
 
   it("shows a late badge", () => {

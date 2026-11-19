@@ -100,13 +100,23 @@ async function main() {
     reportView();
     // Gmail reloads a message's images whenever it re-renders the thread (send completing, new mail,
     // label changes). Report a view each time our pixel is inserted so those fetches stay classified as ours.
+    // Gmail can also redraw the markup around the body and drop the status line. Put it back whenever it is missing.
+    let current: HTMLElement | null = null;
+    let expanded = false;
+    const place = () => {
+      if (!current) return;
+      const body = message.getBodyElement();
+      // Compare position only. A detached message must not count as missing, or every insert would retrigger this.
+      if (current.nextElementSibling === body) return;
+      body.parentElement?.insertBefore(current, body);
+    };
     const observer = new MutationObserver((records) => {
       if (records.some((r) => [...r.addedNodes].some((n) => n instanceof Element && hasPixel(n, settings.serverUrl)))) reportView();
+      place();
     });
     observer.observe(message.getElement(), { childList: true, subtree: true });
     message.on("destroy", () => observer.disconnect());
 
-    let current: HTMLElement | null = null;
     const stop = Kefir.fromEvents<void, unknown>(message, "destroy");
     ticks
       .takeUntilBy(stop)
@@ -125,11 +135,12 @@ async function main() {
       })()))
       .onValue((summary) => {
         if (!summary) return;
-        const body = message.getBodyElement();
-        const next = statusElement(body.ownerDocument, summary);
-        if (current) current.replaceWith(next);
-        else body.parentElement?.insertBefore(next, body);
-        current = next;
+        current?.remove();
+        current = statusElement(message.getBodyElement().ownerDocument, summary, Date.now(), {
+          expanded,
+          onToggle: (next) => { expanded = next; },
+        });
+        place();
       });
   });
 
@@ -158,24 +169,32 @@ async function main() {
     let alive = true;
     let filter: Filter = "all";
     let messages: TrackedMessage[] = [];
-    const draw = () =>
+    const expanded = new Set<string>();
+    const draw = () => {
+      // Redraws replace the list, so keep keyboard focus on the same control.
+      const focused = doc.activeElement instanceof HTMLElement && el.contains(doc.activeElement) ? doc.activeElement.dataset.omtFocus : undefined;
       el.replaceChildren(
-        trackedList(
-          doc,
-          messages,
+        trackedList(doc, messages, {
           filter,
-          (next) => {
+          expanded,
+          onFilter: (next) => {
             filter = next;
             draw();
           },
-          (message) => {
+          onOpen: (message) => {
             const navigation = message.gmail_thread_id
               ? sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: message.gmail_thread_id })
               : sdk.Router.goto(sdk.Router.NativeRouteIDs.SEARCH, { query: messageSearch(message) });
             navigation.catch((err) => log("could not open tracked message", err));
           },
-        ),
+          onToggle: (id) => {
+            if (!expanded.delete(id)) expanded.add(id);
+            draw();
+          },
+        }),
       );
+      if (focused) el.querySelector<HTMLElement>(`[data-omt-focus="${CSS.escape(focused)}"]`)?.focus();
+    };
     const render = async () => {
       try {
         ({ messages } = await api.list(me, 0, 500));

@@ -125,3 +125,34 @@ describe("orphan recovery", () => {
     listeners.destroy();
   });
 });
+
+describe("status line", () => {
+  it("puts the line back when Gmail redraws the message, and keeps its open list showing", async () => {
+    const summary = { opens: 2, firstOpenAt: 1_000_000, lastOpenAt: 2_000_000, openAts: [1_000_000, 2_000_000], late: null };
+    mocks.messageStatus.mockResolvedValue(summary);
+    const wrapper = document.createElement("div");
+    let body = document.createElement("div");
+    wrapper.append(body);
+    const listeners: Record<string, () => void> = {};
+    await mocks.messageHandler.mock.calls[0][0]({
+      getSender: () => ({ emailAddress: "me@example.com" }),
+      getMessageIDAsync: async () => "gm1", getBodyElement: () => body, getElement: () => wrapper,
+      isElementInQuotedArea: () => false,
+      on: (name: string, fn: () => void) => { listeners[name] = fn; }, off: vi.fn(),
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    wrapper.querySelector<HTMLButtonElement>(".omt-status-toggle")!.click();
+
+    // Gmail replaces the markup around the body, dropping our line.
+    body = document.createElement("div");
+    wrapper.replaceChildren(body);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(body.previousElementSibling?.classList.contains("omt-status")).toBe(true);
+
+    // The 30-second refresh redraws the line without collapsing the list.
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(wrapper.querySelectorAll(".omt-status")).toHaveLength(1);
+    expect(wrapper.querySelector<HTMLUListElement>(".omt-status-list")!.hidden).toBe(false);
+    listeners.destroy();
+  });
+});
