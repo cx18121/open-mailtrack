@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { cors } from "hono/cors";
 import { classifyHit, summarize, CLASSIFIER_VERSION, type OpenSummary } from "./classify.js";
 import type { Db, Message } from "./db.js";
@@ -74,17 +74,28 @@ export function createApp(db: Db, config: Config) {
     return c.json({ id, pixelUrl }, 201);
   });
 
-  api.patch("/messages/:id", async (c) => {
-    const body = await c.req.json<{ gmailMessageId: string; gmailThreadId: string }>();
-    if (!body.gmailMessageId || !body.gmailThreadId) {
+  const linkMessage = (recover: boolean) => async (c: Context<{}, "/messages/:id" | "/messages/:id/recover">) => {
+    const body = await c.req.json<{ gmailMessageId: string; gmailThreadId: string; sender?: string }>();
+    if (typeof body.gmailMessageId !== "string" || !body.gmailMessageId || typeof body.gmailThreadId !== "string" || !body.gmailThreadId) {
       return c.json({ error: "gmailMessageId, gmailThreadId required" }, 400);
     }
-    const ok = db.markSent(c.req.param("id"), {
+    const id = c.req.param("id");
+    if (recover) {
+      if (typeof body.sender !== "string" || !body.sender) return c.json({ error: "sender required for recovery" }, 400);
+      const message = db.getMessage(id);
+      if (!message) return c.json({ error: "not found" }, 404);
+      if (message.sender.toLowerCase() !== body.sender.toLowerCase()) return c.json({ error: "sender does not match" }, 409);
+    }
+    const ok = db.markSent(id, {
       messageId: body.gmailMessageId,
       threadId: body.gmailThreadId,
-    });
-    return ok ? c.body(null, 204) : c.json({ error: "not found" }, 404);
-  });
+    }, recover);
+    if (ok) return c.body(null, 204);
+    return db.getMessage(id) ? c.json({ error: "already linked to a different Gmail message" }, 409) : c.json({ error: "not found" }, 404);
+  };
+  api.patch("/messages/:id", linkMessage(false));
+  // A separate route makes recovery fail safely against older servers instead of resetting send time.
+  api.patch("/messages/:id/recover", linkMessage(true));
 
   api.post("/views", async (c) => {
     const body = await c.req.json<{ gmailMessageId: string }>();

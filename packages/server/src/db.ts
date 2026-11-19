@@ -70,7 +70,14 @@ export function openDb(path: string) {
      values (?, ?, ?, ?, ?, ?)`,
   );
   const updateSent = db.prepare(
-    `update messages set sent_at = ?, gmail_message_id = ?, gmail_thread_id = ? where id = ?`,
+    `update messages set sent_at = coalesce(sent_at, ?), gmail_message_id = ?, gmail_thread_id = ?
+     where id = ? and (gmail_message_id is null or gmail_message_id = ?)
+       and (gmail_thread_id is null or gmail_thread_id = ?)`,
+  );
+  const recoverSent = db.prepare(
+    `update messages set sent_at = coalesce(sent_at, created_at), gmail_message_id = ?, gmail_thread_id = ?
+     where id = ? and (gmail_message_id is null or gmail_message_id = ?)
+       and (gmail_thread_id is null or gmail_thread_id = ?)`,
   );
   const selectMessage = db.prepare(`select * from messages where id = ?`);
   const selectMessages = db.prepare(`select * from messages order by created_at desc`);
@@ -89,8 +96,9 @@ export function openDb(path: string) {
     createMessage(m: Pick<Message, "id" | "sender" | "recipients" | "subject" | "source">) {
       insertMessage.run(m.id, m.sender, JSON.stringify(m.recipients), m.subject, m.source, Date.now());
     },
-    markSent(id: string, gmail: { messageId: string; threadId: string }) {
-      return updateSent.run(Date.now(), gmail.messageId, gmail.threadId, id).changes > 0;
+    markSent(id: string, gmail: { messageId: string; threadId: string }, recover = false) {
+      const args = [gmail.messageId, gmail.threadId, id, gmail.messageId, gmail.threadId];
+      return (recover ? recoverSent.run(...args) : updateSent.run(Date.now(), ...args)).changes > 0;
     },
     getMessage(id: string) {
       const row = selectMessage.get(id) as MessageRow | undefined;

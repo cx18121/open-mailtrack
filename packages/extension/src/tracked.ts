@@ -1,5 +1,6 @@
 import type { TrackedMessage } from "./api.js";
 import { lateText } from "./marks.js";
+import { messageSearch } from "./link.js";
 import { ago } from "./time.js";
 
 const iconUrl = (opened: boolean) => chrome.runtime.getURL(opened ? "icons/opened.svg" : "icons/sent.svg");
@@ -23,7 +24,7 @@ export function trackedList(
   all: TrackedMessage[],
   filter: Filter,
   onFilter: (next: Filter) => void,
-  onOpen: (gmailThreadId: string) => void,
+  onOpen: (message: TrackedMessage) => void,
   now = Date.now(),
 ): HTMLElement {
   const root = doc.createElement("div");
@@ -64,17 +65,16 @@ export function trackedList(
   list.className = "omt-tracked-list";
   list.setAttribute("role", "list");
   for (const m of messages) {
-    const row = doc.createElement(m.gmail_thread_id ? "a" : "div");
+    const row = doc.createElement("a");
     row.className = `omt-tracked-row${m.opens > 0 ? " omt-tracked-opened" : ""}`;
     row.setAttribute("role", "listitem");
-    if (m.gmail_thread_id && row instanceof HTMLAnchorElement) {
-      row.href = "#";
-      const threadId = m.gmail_thread_id;
-      row.addEventListener("click", (e) => {
-        e.preventDefault();
-        onOpen(threadId);
-      });
-    }
+    row.href = m.gmail_thread_id ? `#all/${encodeURIComponent(m.gmail_thread_id)}` : `#search/${encodeURIComponent(messageSearch(m))}`;
+    if (!m.gmail_thread_id) row.title = "Find this sent message in Gmail to restore its tracking marks";
+    row.addEventListener("click", (e) => {
+      if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+      e.preventDefault();
+      onOpen(m);
+    });
 
     const img = doc.createElement("img");
     img.src = iconUrl(m.opens > 0);

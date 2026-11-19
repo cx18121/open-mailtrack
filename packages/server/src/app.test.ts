@@ -161,6 +161,62 @@ describe("pixel", () => {
     expect(detail.sent_at).toBeTypeOf("number");
   });
 
+  it("recovers an orphan's Gmail linkage without making an old message look newly sent", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const app = setup();
+    const { id } = await (await app.request("/api/messages", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ sender: "me@x.com", recipients: ["a@y.com"], subject: "hi" }),
+    })).json();
+    now.mockReturnValue(1_120_000);
+    await app.request(`/p/${id}.gif`, { headers: { "user-agent": "GoogleImageProxy" } });
+    const detail = async () => (await app.request(`/api/messages/${id}`, { headers: auth })).json();
+    expect(await detail()).toMatchObject({ gmail_thread_id: null, sent_at: null, opens: 1 });
+
+    now.mockReturnValue(9_000_000);
+    const link = (sender: unknown = "me@x.com") => app.request(`/api/messages/${id}/recover`, {
+      method: "PATCH", headers: auth,
+      body: JSON.stringify({ gmailMessageId: "gm1", gmailThreadId: "gt1", sender }),
+    });
+    expect((await link(null)).status).toBe(400);
+    expect((await link("someone-else@x.com")).status).toBe(409);
+    expect(await detail()).toMatchObject({ gmail_thread_id: null, sent_at: null });
+    expect((await link()).status).toBe(204);
+    expect(await detail()).toMatchObject({ gmail_message_id: "gm1", gmail_thread_id: "gt1", sent_at: 1_000_000, opens: 1 });
+    expect((await link()).status).toBe(204);
+    const status = await (await app.request("/api/status?messageIds=gm1&threadIds=gt1", { headers: auth })).json();
+    expect(status.messages.gm1.opens).toBe(1);
+    expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 1 });
+    const list = await (await app.request("/api/messages", { headers: auth })).json();
+    expect(list.messages[0].gmail_thread_id).toBe("gt1");
+  });
+
+  it("keeps existing links and send times stable on retries and refuses conflicting recovery", async () => {
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const app = setup();
+    const { id } = await (await app.request("/api/messages", {
+      method: "POST", headers: auth,
+      body: JSON.stringify({ sender: "me@x.com", recipients: ["a@y.com"], subject: "hi" }),
+    })).json();
+    const patch = (suffix: string, gmailMessageId = "gm1", gmailThreadId = "gt1") => app.request(`/api/messages/${id}${suffix}`, {
+      method: "PATCH", headers: auth, body: JSON.stringify({ gmailMessageId, gmailThreadId, sender: "me@x.com" }),
+    });
+    now.mockReturnValue(1_001_000);
+    expect((await patch("")).status).toBe(204);
+    now.mockReturnValue(9_000_000);
+    expect((await patch("")).status).toBe(204);
+    expect((await patch("/recover")).status).toBe(204);
+    for (const suffix of ["", "/recover"]) {
+      expect((await patch(suffix, "other", "gt1")).status).toBe(409);
+      expect((await patch(suffix, "gm1", "other")).status).toBe(409);
+    }
+    const detail = await (await app.request(`/api/messages/${id}`, { headers: auth })).json();
+    expect(detail).toMatchObject({ gmail_message_id: "gm1", gmail_thread_id: "gt1", sent_at: 1_001_000 });
+    expect((await app.request("/api/messages/missing/recover", {
+      method: "PATCH", headers: auth, body: JSON.stringify({ gmailMessageId: "gm1", gmailThreadId: "gt1", sender: "me@x.com" }),
+    })).status).toBe(404);
+  });
+
   it("lists messages most recently opened first, then unopened by send time", async () => {
     const app = setup();
     const create = async (subject: string) =>

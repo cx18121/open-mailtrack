@@ -1,11 +1,12 @@
 import * as InboxSDK from "@inboxsdk/core";
 import Kefir from "kefir";
 import { createApi, createStatusBatcher, type ThreadSummary, type TrackedMessage } from "./api.js";
+import { messageSearch, ownPixelId } from "./link.js";
 import { rowImage, statusElement } from "./marks.js";
 import { expandOperator, OPERATORS } from "./search.js";
 import { trackedList, type Filter } from "./tracked.js";
 import { loadSettings } from "./settings.js";
-import { createPixel, hasPixel, newId, PIXEL_ATTR, removePixels } from "./tracking.js";
+import { createPixel, hasPixel, newId, removePixels } from "./tracking.js";
 
 const APP_ID = "sdk_openmt_62266805c2";
 const TRACKED_ROUTE = "tracked";
@@ -30,6 +31,7 @@ async function main() {
 
   sdk.Compose.registerComposeViewHandler((compose) => {
     let pixel: HTMLImageElement | null = null;
+    let pending: { id: string; registered: Promise<boolean> } | null = null;
     let enabled = true;
 
     const toggle = Kefir.pool<boolean, unknown>();
@@ -58,22 +60,36 @@ async function main() {
       const id = newId();
       pixel = createPixel(body.ownerDocument, settings.serverUrl, id);
       body.appendChild(pixel);
-      api.register({ id, sender: me, recipients, subject: compose.getSubject() }).catch((err) => log(err));
+      const registration = { id, sender: me, recipients, subject: compose.getSubject() };
+      pending = {
+        id,
+        registered: api.register(registration).then(() => true, (err) => { log(err); return false; }),
+      };
       log("tracking", id, recipients);
     });
 
     compose.on("sendCanceled", () => {
       pixel?.remove();
       pixel = null;
+      pending = null;
     });
 
     compose.on("sent", async (event) => {
-      const id = pixel?.getAttribute(PIXEL_ATTR);
+      const sent = pending;
+      pending = null;
       pixel = null;
-      if (!id) return;
-      const [messageId, threadId] = await Promise.all([event.getMessageID(), event.getThreadID()]);
-      api.markSent(id, messageId, threadId).catch((err) => log(err));
-      log("sent", id, messageId, threadId);
+      if (!sent) return;
+      try {
+        const [registered, messageId, threadId] = await Promise.all([
+          sent.registered, event.getMessageID(), event.getThreadID(),
+        ]);
+        if (!registered) return;
+        await api.markSent(sent.id, messageId, threadId);
+        log("sent", sent.id, messageId, threadId);
+      } catch (err) {
+        // The sent body still carries the pixel ID, so opening it can recover the link later.
+        log("could not link sent message", err);
+      }
     });
   });
 
@@ -94,7 +110,19 @@ async function main() {
     const stop = Kefir.fromEvents<void, unknown>(message, "destroy");
     ticks
       .takeUntilBy(stop)
-      .flatMapLatest(() => Kefir.fromPromise(status.message(messageId)))
+      .flatMapLatest(() => Kefir.fromPromise((async () => {
+        const summary = await status.message(messageId);
+        if (summary) return summary;
+        const id = ownPixelId(message.getBodyElement(), settings.serverUrl, (img) => message.isElementInQuotedArea(img));
+        if (!id) return;
+        try {
+          const threadId = await message.getThreadView().getThreadIDAsync();
+          await api.recoverLink(id, messageId, threadId, me);
+          return await status.message(messageId);
+        } catch (err) {
+          log("could not recover message link", err);
+        }
+      })()))
       .onValue((summary) => {
         if (!summary) return;
         const body = message.getBodyElement();
@@ -140,7 +168,12 @@ async function main() {
             filter = next;
             draw();
           },
-          (threadId) => sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: threadId }),
+          (message) => {
+            const navigation = message.gmail_thread_id
+              ? sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: message.gmail_thread_id })
+              : sdk.Router.goto(sdk.Router.NativeRouteIDs.SEARCH, { query: messageSearch(message) });
+            navigation.catch((err) => log("could not open tracked message", err));
+          },
         ),
       );
     const render = async () => {

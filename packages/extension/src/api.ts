@@ -29,6 +29,8 @@ export function createApi(settings: Settings) {
     register: (r: Registration) => call("/messages", "POST", { ...r, source: "extension" }),
     markSent: (id: string, gmailMessageId: string, gmailThreadId: string) =>
       call(`/messages/${id}`, "PATCH", { gmailMessageId, gmailThreadId }),
+    recoverLink: (id: string, gmailMessageId: string, gmailThreadId: string, sender: string) =>
+      call(`/messages/${id}/recover`, "PATCH", { gmailMessageId, gmailThreadId, sender }),
     view: (gmailMessageId: string) => call("/views", "POST", { gmailMessageId }),
     status: async (messageIds: string[], threadIds: string[]): Promise<Status> => {
       const q = new URLSearchParams({ messageIds: messageIds.join(","), threadIds: threadIds.join(",") });

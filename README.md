@@ -40,6 +40,8 @@ After rebuilding an installed extension, reload it in `chrome://extensions` and 
 
 Tracking is on by default for every send, including replies. There is an option in the compose email toolbar to turn tracking off for a message. Mail addressed only to yourself is never tracked.
 
+If a tracked message lost its Gmail link, clicking its Tracked row searches your sent mail. Open the matching message to restore its link and inbox marks. Recovery uses its own tracking pixel, not a subject match. Update the server before reloading the rebuilt extension to enable recovery. Recovery falls back to the original registration time when the send time was never recorded.
+
 ## CLI
 
 Create a Google OAuth client: Cloud Console → enable the Gmail API → OAuth consent screen (External, add yourself as a test user, then **Publish** so tokens do not expire after 7 days) → Credentials → OAuth client ID → Desktop app.
@@ -59,7 +61,8 @@ Columns: `contact_email`, `subject`, `body`. Attachments in a `files/` folder ne
 Any sender can use the server directly with `Authorization: Bearer <API_KEY>`:
 
 - `POST /api/messages` `{sender, recipients, subject}` → `{id, pixelUrl}`. Put `<img src="pixelUrl" width="1" height="1">` in the HTML body.
-- `PATCH /api/messages/:id` `{gmailMessageId, gmailThreadId}` after sending, so the extension can show status.
+- `PATCH /api/messages/:id` `{gmailMessageId, gmailThreadId}` after sending, so the extension can show status. Repeated requests preserve the send time. Conflicting Gmail IDs return `409`.
+- `PATCH /api/messages/:id/recover` `{gmailMessageId, gmailThreadId, sender}` restores missing links from a sent message's own pixel. The sender must match the tracking record. Preserves the send time, or uses the registration time if absent. Conflicting Gmail IDs return `409`.
 - `GET /api/messages/:id` for every hit and its classification.
 
 ## development

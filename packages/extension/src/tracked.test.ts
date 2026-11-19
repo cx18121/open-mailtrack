@@ -42,8 +42,22 @@ describe("trackedList", () => {
     expect(rows[0].querySelector(".omt-status-late")!.textContent).toBe("3 days after sending");
     expect(rows[0].querySelector(".omt-tracked-to")!.textContent).toBe("ana");
     (rows[0] as HTMLAnchorElement).click();
-    expect(onOpen).toHaveBeenCalledWith("t1");
-    expect(rows[1].tagName).toBe("DIV");
+    expect(onOpen.mock.calls[0][0].gmail_thread_id).toBe("t1");
+    expect(rows[1].tagName).toBe("A");
+    expect(rows[1].getAttribute("href")).toContain("#search/");
+    (rows[1] as HTMLAnchorElement).click();
+    expect(onOpen.mock.calls[1][0]).toMatchObject({ id: "y", gmail_thread_id: null });
+  });
+
+  it("preserves browser navigation for modified clicks", () => {
+    const onOpen = vi.fn();
+    const el = trackedList(document, [msg({})], "all", () => {}, onOpen, now);
+    const row = el.querySelector("a")!;
+    expect(row.getAttribute("href")).toBe("#all/t1");
+    const event = new MouseEvent("click", { ctrlKey: true, cancelable: true });
+    row.dispatchEvent(event);
+    expect(onOpen).not.toHaveBeenCalled();
+    expect(event.defaultPrevented).toBe(false);
   });
 
   it("filters by chip and reports the change", () => {
