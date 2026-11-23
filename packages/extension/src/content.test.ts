@@ -98,6 +98,10 @@ function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}
     getSubject: () => "Hello",
     getThreadID: () => "gt1",
     getCurrentDraftID: async () => "draft-123",
+    getInitialMessageID: () => "dmsg-orig",
+    getMessageID: () => {
+      throw new Error("This method was discontinued after API version 1");
+    },
     close,
   });
   return { events, body, close };

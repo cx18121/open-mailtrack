@@ -218,15 +218,19 @@ async function main() {
         const html = compose.getHTMLContent?.() ?? compose.getBodyElement().innerHTML;
         const subject = compose.getSubject();
         const threadId = compose.getThreadID?.() || null;
-        const draftMessageId = compose.getMessageID?.() || null;
-        const draftId =
-          (await compose.getDraftID?.().catch(() => null)) ||
-          (await compose.getCurrentDraftID?.().catch(() => null)) ||
-          null;
         const composeEl = compose.getElement?.();
         const hasAttachments = Boolean(
           composeEl?.querySelector('[data-tooltip*="Remove attachment"], [aria-label*="Remove attachment"], .vI, .dL'),
         );
+        const draftMessageId = compose.getInitialMessageID?.() || null;
+        let draftId = (await compose.getCurrentDraftID?.().catch(() => null)) || null;
+        if (!draftId && hasAttachments && compose.getDraftID) {
+          draftId =
+            (await Promise.race([
+              compose.getDraftID().catch(() => null),
+              new Promise<null>((r) => setTimeout(() => r(null), 4000)),
+            ])) || null;
+        }
 
         const res = await api.enqueueOutbox({
           sender: me,
