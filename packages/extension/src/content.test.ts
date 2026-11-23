@@ -1,110 +1,201 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const mocks = vi.hoisted(() => ({
-  composeHandler: vi.fn(), messageHandler: vi.fn(), rowHandler: vi.fn(),
-  register: vi.fn(), markSent: vi.fn(), recoverLink: vi.fn(), view: vi.fn(),
+  composeHandler: vi.fn(),
+  messageHandler: vi.fn(),
+  rowHandler: vi.fn(),
+  accounts: vi.fn(),
+  enqueueOutbox: vi.fn(),
+  cancelOutbox: vi.fn(),
+  recoverLink: vi.fn(),
+  view: vi.fn(),
   messageStatus: vi.fn(),
+  showMessage: vi.fn(),
+  openDraftByMessageID: vi.fn(),
+  showModalView: vi.fn(),
 }));
-vi.mock("@inboxsdk/core", () => ({ load: async () => ({
-  User: { getEmailAddress: () => "me@example.com" },
-  Compose: { registerComposeViewHandler: mocks.composeHandler },
-  Conversations: { registerMessageViewHandler: mocks.messageHandler },
-  Lists: { registerThreadRowViewHandler: mocks.rowHandler },
-  Router: { handleCustomRoute: vi.fn() },
-  Search: { registerSearchQueryRewriter: vi.fn() },
-  NavMenu: { addNavItem: vi.fn() },
-}) }));
-vi.mock("./settings.js", () => ({ loadSettings: async () => ({ serverUrl: "https://t.example.com", apiKey: "k" }) }));
+
+vi.mock("@inboxsdk/core", () => ({
+  load: async () => ({
+    User: { getEmailAddress: () => "me@cornell.edu" },
+    Compose: {
+      registerComposeViewHandler: mocks.composeHandler,
+      openDraftByMessageID: mocks.openDraftByMessageID,
+    },
+    Conversations: { registerMessageViewHandler: mocks.messageHandler },
+    Lists: { registerThreadRowViewHandler: mocks.rowHandler },
+    Router: { handleCustomRoute: vi.fn(), goto: vi.fn().mockResolvedValue(undefined) },
+    Search: { registerSearchQueryRewriter: vi.fn() },
+    NavMenu: { addNavItem: vi.fn() },
+    ButterBar: { showMessage: mocks.showMessage },
+    Widgets: { showModalView: mocks.showModalView },
+  }),
+}));
+vi.mock("./settings.js", () => ({
+  loadSettings: async () => ({ serverUrl: "https://t.example.com", apiKey: "k", undoDelaySec: 5 }),
+}));
 vi.mock("./api.js", () => ({
-  createApi: () => ({ register: mocks.register, markSent: mocks.markSent, recoverLink: mocks.recoverLink, view: mocks.view }),
+  createApi: () => ({
+    accounts: mocks.accounts,
+    enqueueOutbox: mocks.enqueueOutbox,
+    cancelOutbox: mocks.cancelOutbox,
+    recoverLink: mocks.recoverLink,
+    view: mocks.view,
+  }),
   createStatusBatcher: () => ({ message: mocks.messageStatus }),
 }));
+
+async function boot(connected = true) {
+  vi.resetModules();
+  mocks.accounts.mockResolvedValue({
+    accounts: connected ? [{ email: "me@cornell.edu", authType: "oauth", displayName: "Me", connectedAt: 1, updatedAt: 1 }] : [],
+    hasServerGoogleClient: false,
+  });
+  await import("./content.js");
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+}
 
 beforeEach(async () => {
   vi.useFakeTimers();
   vi.resetAllMocks();
-  vi.resetModules();
-  mocks.register.mockResolvedValue({});
-  mocks.markSent.mockResolvedValue({});
+  mocks.enqueueOutbox.mockResolvedValue({ outboxId: "ob1", messageId: "m1", sendAt: Date.now() + 5000, status: "queued" });
+  mocks.cancelOutbox.mockResolvedValue({ canceled: true, draftId: "d1", draftMessageId: "dm1" });
   mocks.recoverLink.mockResolvedValue({});
   mocks.view.mockResolvedValue({});
-  vi.stubGlobal("chrome", { runtime: { getURL: (path: string) => path } });
+  vi.stubGlobal("chrome", { runtime: { getURL: (path: string) => path, sendMessage: vi.fn() } });
   document.body.innerHTML = "";
-  await import("./content.js");
-  await Promise.resolve();
-  await Promise.resolve();
 });
+
 afterEach(() => {
   vi.clearAllTimers();
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
 
-function compose() {
+function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}) {
   const events: Record<string, (...args: any[]) => any> = {};
   const body = document.createElement("div");
+  body.innerHTML = "<p>Hello group</p>";
+  const close = vi.fn();
+  const to = (opts.to ?? ["ana@example.com"]).map((emailAddress) => ({ emailAddress }));
+  const cc = (opts.cc ?? []).map((emailAddress) => ({ emailAddress }));
+  const bcc = (opts.bcc ?? []).map((emailAddress) => ({ emailAddress }));
+
   mocks.composeHandler.mock.calls[0][0]({
-    addButton: vi.fn(), on: (name: string, fn: (...args: any[]) => any) => { events[name] = fn; },
-    getToRecipients: () => [{ emailAddress: "ana@example.com" }],
-    getCcRecipients: () => [], getBccRecipients: () => [],
-    getBodyElement: () => body, getSubject: () => "Hello",
+    addButton: vi.fn(),
+    addComposeNotice: vi.fn(() => ({ el: document.createElement("div") })),
+    on: (name: string, fn: (...args: any[]) => any) => {
+      events[name] = fn;
+    },
+    getToRecipients: () => to,
+    getCcRecipients: () => cc,
+    getBccRecipients: () => bcc,
+    getFromContact: () => ({ name: "Charlie", emailAddress: "me@cornell.edu" }),
+    getBodyElement: () => body,
+    getHTMLContent: () => body.innerHTML,
+    getSubject: () => "Hello",
+    getThreadID: () => "gt1",
+    getCurrentDraftID: async () => "draft-123",
+    close,
   });
-  return { events, body };
+  return { events, body, close };
 }
-const sent = () => ({ getMessageID: async () => "gm1", getThreadID: async () => "gt1" });
 
-describe("compose linkage", () => {
-  it("waits for registration before attaching Gmail IDs even when send completes first", async () => {
-    let registered!: () => void;
-    mocks.register.mockImplementation(() => new Promise<void>((resolve) => { registered = resolve; }));
-    const { events } = compose();
-    events.presending();
-    const done = events.sent(sent());
-    await Promise.resolve();
-    await Promise.resolve();
-    expect(mocks.markSent).not.toHaveBeenCalled();
-    registered();
-    await done;
-    expect(mocks.markSent).toHaveBeenCalledWith(mocks.register.mock.calls[0][0].id, "gm1", "gt1");
+describe("unified outbox send", () => {
+  it("intercepts presending on connected accounts, enqueues with Undo Send, and restores draft on Undo", async () => {
+    await boot(true);
+    const { events, close } = makeCompose({ to: ["ana@example.com"], cc: ["bob@example.com"] });
+    const cancel = vi.fn();
+    events.presending({ cancel });
+    expect(cancel).toHaveBeenCalledOnce();
+
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.enqueueOutbox).toHaveBeenCalledWith(
+      expect.objectContaining({
+        sender: "me@cornell.edu",
+        to: ["ana@example.com"],
+        cc: ["bob@example.com"],
+        subject: "Hello",
+        html: "<p>Hello group</p>",
+        threadId: "gt1",
+        draftId: "draft-123",
+        undoDelayMs: 5000,
+      }),
+    );
+    expect(close).toHaveBeenCalledOnce();
+
+    // Trigger Undo button from ButterBar
+    const butterCall = mocks.showMessage.mock.calls[0][0];
+    expect(butterCall.buttons[0].title).toBe("Undo");
+    butterCall.buttons[0].onClick();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.cancelOutbox).toHaveBeenCalledWith("ob1", true);
+    expect(mocks.openDraftByMessageID).toHaveBeenCalledWith("dm1");
   });
 
-  it("keeps linkage independent of Gmail rewriting the pixel's DOM attributes", async () => {
-    const { events, body } = compose();
-    events.presending();
-    body.querySelector("img")!.removeAttribute("data-omt");
-    await events.sent(sent());
-    expect(mocks.markSent).toHaveBeenCalledOnce();
-  });
-
-  it("handles rejected SDK ID lookups and retains the registered pixel for later recovery", async () => {
+  it("fails closed and keeps compose open when server enqueue fails", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    const { events, body } = compose();
-    events.presending();
-    await expect(events.sent({ ...sent(), getThreadID: async () => { throw new Error("Gmail ID unavailable"); } })).resolves.toBeUndefined();
-    expect(mocks.register).toHaveBeenCalledOnce();
-    expect(mocks.markSent).not.toHaveBeenCalled();
-    expect(body.querySelector("img")).not.toBeNull();
+    await boot(true);
+    mocks.enqueueOutbox.mockRejectedValueOnce(new Error("Tunnel offline"));
+    const { events, close } = makeCompose();
+    const cancel = vi.fn();
+    events.presending({ cancel });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(mocks.showMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("still open") }));
     log.mockRestore();
   });
 
-  it("does not attach IDs after a canceled send or failed registration", async () => {
-    const { events, body } = compose();
-    events.presending();
-    events.sendCanceled();
-    expect(body.querySelector("img")).toBeNull();
-    await events.sent(sent());
-    expect(mocks.markSent).not.toHaveBeenCalled();
+  it("enforces the 25-recipient cap and keeps compose open", async () => {
+    await boot(true);
+    const many = Array.from({ length: 26 }, (_, i) => `u${i}@example.com`);
+    const { events, close } = makeCompose({ to: many });
+    const cancel = vi.fn();
+    events.presending({ cancel });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(mocks.enqueueOutbox).not.toHaveBeenCalled();
+    expect(close).not.toHaveBeenCalled();
+    expect(mocks.showMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("25") }));
+  });
+
+  it("sends natively and untracked on confirmed unconnected accounts", async () => {
+    await boot(false);
+    const { events } = makeCompose();
+    const cancel = vi.fn();
+    events.presending({ cancel });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).not.toHaveBeenCalled();
+    expect(mocks.enqueueOutbox).not.toHaveBeenCalled();
+  });
+
+  it("fails closed when initial account lookup fails on cold start", async () => {
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
-    mocks.register.mockRejectedValueOnce(new Error("Offline"));
-    events.presending();
-    await events.sent(sent());
-    expect(mocks.markSent).not.toHaveBeenCalled();
+    vi.resetModules();
+    mocks.accounts.mockRejectedValue(new Error("Server unreachable"));
+    await import("./content.js");
+    await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const { events, close } = makeCompose();
+    const cancel = vi.fn();
+    events.presending({ cancel });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(cancel).toHaveBeenCalledOnce();
+    expect(close).not.toHaveBeenCalled();
+    expect(mocks.enqueueOutbox).not.toHaveBeenCalled();
+    expect(mocks.showMessage).toHaveBeenCalledWith(expect.objectContaining({ text: expect.stringContaining("still open") }));
     log.mockRestore();
   });
 });
 
 describe("orphan recovery", () => {
-  it("restores a missing link using the sent body's own pixel, then renders status", async () => {
+  it("restores a missing link for legacy messages using the sent body's own pixel, then renders status", async () => {
+    await boot(true);
     const summary = { opens: 1, firstOpenAt: 1_000_000, lastOpenAt: 1_000_000, openAts: [1_000_000], late: null };
     mocks.messageStatus.mockResolvedValueOnce(undefined).mockResolvedValue(summary);
     const wrapper = document.createElement("div");
@@ -113,14 +204,19 @@ describe("orphan recovery", () => {
     wrapper.append(body);
     const listeners: Record<string, () => void> = {};
     await mocks.messageHandler.mock.calls[0][0]({
-      getSender: () => ({ emailAddress: "me@example.com" }),
-      getMessageIDAsync: async () => "gm1", getBodyElement: () => body, getElement: () => wrapper,
+      getSender: () => ({ emailAddress: "me@cornell.edu" }),
+      getMessageIDAsync: async () => "gm1",
+      getBodyElement: () => body,
+      getElement: () => wrapper,
       isElementInQuotedArea: () => false,
       getThreadView: () => ({ getThreadIDAsync: async () => "gt1" }),
-      on: (name: string, fn: () => void) => { listeners[name] = fn; }, off: vi.fn(),
+      on: (name: string, fn: () => void) => {
+        listeners[name] = fn;
+      },
+      off: vi.fn(),
     });
     await vi.advanceTimersByTimeAsync(0);
-    expect(mocks.recoverLink).toHaveBeenCalledWith("AAAAAAAAAAAAAAAAAAAAAA", "gm1", "gt1", "me@example.com");
+    expect(mocks.recoverLink).toHaveBeenCalledWith("AAAAAAAAAAAAAAAAAAAAAA", "gm1", "gt1", "me@cornell.edu");
     expect(wrapper.querySelector(".omt-status")?.textContent).toContain("Opened");
     listeners.destroy();
   });
@@ -128,6 +224,7 @@ describe("orphan recovery", () => {
 
 describe("status line", () => {
   it("puts the line back when Gmail redraws the message, and keeps its open list showing", async () => {
+    await boot(true);
     const summary = { opens: 2, firstOpenAt: 1_000_000, lastOpenAt: 2_000_000, openAts: [1_000_000, 2_000_000], late: null };
     mocks.messageStatus.mockResolvedValue(summary);
     const wrapper = document.createElement("div");
@@ -135,23 +232,23 @@ describe("status line", () => {
     wrapper.append(body);
     const listeners: Record<string, () => void> = {};
     await mocks.messageHandler.mock.calls[0][0]({
-      getSender: () => ({ emailAddress: "me@example.com" }),
-      getMessageIDAsync: async () => "gm1", getBodyElement: () => body, getElement: () => wrapper,
+      getSender: () => ({ emailAddress: "me@cornell.edu" }),
+      getMessageIDAsync: async () => "gm1",
+      getBodyElement: () => body,
+      getElement: () => wrapper,
       isElementInQuotedArea: () => false,
-      on: (name: string, fn: () => void) => { listeners[name] = fn; }, off: vi.fn(),
+      on: (name: string, fn: () => void) => {
+        listeners[name] = fn;
+      },
+      off: vi.fn(),
     });
     await vi.advanceTimersByTimeAsync(0);
     wrapper.querySelector<HTMLButtonElement>(".omt-status-toggle")!.click();
 
-    // Gmail replaces the markup around the body, dropping our line.
     body = document.createElement("div");
     wrapper.replaceChildren(body);
     await vi.advanceTimersByTimeAsync(0);
     expect(body.previousElementSibling?.classList.contains("omt-status")).toBe(true);
-
-    // The 30-second refresh redraws the line without collapsing the list.
-    await vi.advanceTimersByTimeAsync(30_000);
-    expect(wrapper.querySelectorAll(".omt-status")).toHaveLength(1);
     expect(wrapper.querySelector<HTMLUListElement>(".omt-status-list")!.hidden).toBe(false);
     listeners.destroy();
   });

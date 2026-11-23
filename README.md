@@ -1,18 +1,21 @@
 # open-mailtrack
 
-Self-hosted open tracking for Gmail cause I didn't want to pay for mailsuite
+Self-hosted open tracking for Gmail and Google Workspace cause I didn't want to pay for mailsuite
 
-- **Server**: this records tracking pixel hits. Uses node, SQLite, and a Docker container
-- **Chrome extension**: adds the pixel to mail you send from Gmail and shows open status in your sent list and on each message
-- **CLI** (`openmt`): sends tracked mail from a CSV or XLSX through the Gmail API. Shows up in the same sent list marks
+- **Server**: records tracking pixel hits, dispatches per-recipient SMTP copies, keeps your Sent folder pixel-free, runs server-backed Undo Send and Schedule Send, and tracks per-contact history. Uses Node, SQLite, and a Docker container
+- **Chrome extension**: routes tracked Gmail sends and scheduled sends through your server, shows per-recipient open status in your sent list and on each message, and adds a `Tracked` view with Messages, Scheduled, and Contacts tabs
+- **CLI** (`openmt`): sends tracked mail from a CSV or XLSX through the server's unified SMTP pipeline (pixel-free Sent copies and per-recipient `--cc` tracking)
 
 ## how it works
 
-A tracked message carries a 1×1 image on your server so when the recipient's client renders the message, the server records a response. A few notes:
-- Reopening in the same Gmail tab does not refetch, but a new session or device does
-- The extension blocks this server's tracking pixels in Gmail, including Google's proxied URLs, throughout the browser profile where it is installed. Your own views are also reported and excluded as a fallback. A second Gmail account in the same profile is blocked too. Other profiles and devices are unaffected
-- Gmail's known prefetch bot is excluded. Google image-proxy fetches within 30 seconds of a recorded send are also excluded, even on a new thread. A genuine read during that window may go uncounted
-- Untested with Apple mail and Outlook email client
+Connected Gmail and Google Workspace accounts send tracked mail through your self-hosted server via Gmail SMTP (`smtp.gmail.com`):
+- **Per-recipient tracking.** Every recipient in `To`, `Cc`, and `Bcc` receives their own SMTP copy (`RCPT TO`) with a unique 1×1 tracking pixel while preserving identical `To`, `Cc`, `Subject`, `In-Reply-To`, and `References` headers so group threads and Reply-All work normally. `Bcc` headers are stripped from all recipient copies. Gmail compose caps per-recipient group tracking at 25 recipients per email.
+- **All-device self-open immunity.** After SMTP delivery, the server deletes the duplicate Sent copies Gmail auto-saves and inserts one clean, pixel-free copy into `SENT` (retaining `Bcc` for your own records). Viewing your sent mail on your phone, tablet, or another browser will not trigger a false open. The extension also keeps its browser-profile pixel-blocking rule enabled to block quoted pixels in incoming replies.
+- **Unified outbox (Undo Send and Schedule Send).** Clicking Send queues the email in SQLite for your configured Undo Send delay (default 5 seconds) and removes the Gmail draft. Clicking Undo cancels dispatch and restores the draft in Gmail. Gmail's Schedule Send menu queues messages in the same outbox, manageable in `Tracked → Scheduled` (Send now, Reschedule, or Cancel and restore draft).
+- **Fail closed and unconnected accounts.** If your server or SMTP fails, the compose window and draft stay open with an error banner. Gmail accounts not yet connected to the server send natively and untracked with a prompt to connect.
+- **Apple Mail Privacy Protection (MPP).** The server downloads and caches Apple's published iCloud Private Relay egress IP CSV (`https://mask-api.icloud.com/egress-ip-ranges.csv`). Hits from Apple relay IPs with bare `Mozilla/5.0` are classified as `apple_mpp` and shown with a distinct muted blue-grey icon ("Apple Mail privacy proxy · may have been opened") without turning checkmarks green or inflating confirmed open counts.
+- **Gmail prefetch filtering.** Gmail's known prefetch bot is excluded. Google image-proxy fetches within 30 seconds of a recorded send are also excluded.
+- **Per-contact history.** Browse all contacts in `Tracked → Contacts` or click any recipient in a thread's status line to view every tracked message sent to them, individual open timestamps, and open rate. Legacy multi-recipient messages sent before this upgrade appear as "Opened (group, recipient unknown)" without skewing individual open rates.
 
 ## server
 
@@ -21,9 +24,13 @@ You need a public HTTPS hostname. The compose file uses a Cloudflare Tunnel so n
 ```bash
 git clone https://github.com/cx18121/open-mailtrack.git
 cd open-mailtrack/deploy
-cp .env.example .env   # API_KEY (any long secret), PUBLIC_URL (https://t.example.com), TUNNEL_TOKEN
+cp .env.example .env   # API_KEY, PUBLIC_URL (https://t.example.com), TUNNEL_TOKEN
 docker compose up -d --build
 ```
+
+Optional `.env` variables:
+- `TOKEN_ENCRYPTION_KEY`: separate secret for encrypting stored mailbox credentials and queued outbox payloads in SQLite (AES-256-GCM; defaults to `API_KEY`). Outbox payloads are purged immediately after send or cancel.
+- `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET`: server-level Google OAuth client credentials so you can authorize accounts in one click from extension options.
 
 The tunnel's public hostname should point at `server:8787`. Data lives in the `data` volume.
 
@@ -34,36 +41,37 @@ pnpm install
 pnpm --filter @open-mailtrack/extension build
 ```
 
-`chrome://extensions` → Developer mode → Load unpacked → `packages/extension/dist`. Enter the server URL and API key in the extension's options, then reload Gmail.
+`chrome://extensions` → Developer mode → Load unpacked → `packages/extension/dist`. Open the extension's options, enter your server URL, API key, and Undo Send delay, save, then connect each Gmail or Google Workspace account you use:
+- **Google OAuth** (`https://mail.google.com/` scope, redirect URI `<PUBLIC_URL>/auth/google/callback`): works on personal Gmail (publish the OAuth consent screen to Production so refresh tokens do not expire after 7 days) and Workspace accounts that allow OAuth apps.
+- **Google App Password** (SMTP + IMAP): works on personal Gmail and Workspace accounts where unverified OAuth apps are restricted (requires 2-Step Verification and App Passwords enabled).
 
-After rebuilding an installed extension, reload it in `chrome://extensions` and reload Gmail. The extension updates its saved pixel-blocking rule automatically. This blocks browser-generated loads, not automatic fetches on the recipient's side.
-
-Tracking is on by default for every send, including replies. There is an option in the compose email toolbar to turn tracking off for a message. Mail addressed only to yourself is never tracked.
-
-If a tracked message lost its Gmail link, clicking its Tracked row searches your sent mail. Open the matching message to restore its link and inbox marks. Recovery uses its own tracking pixel, not a subject match. Update the server before reloading the rebuilt extension to enable recovery. Recovery falls back to the original registration time when the send time was never recorded.
+After rebuilding an installed extension, reload it in `chrome://extensions` and reload Gmail.
 
 ## CLI
-
-Create a Google OAuth client: Cloud Console → enable the Gmail API → OAuth consent screen (External, add yourself as a test user, then **Publish** so tokens do not expire after 7 days) → Credentials → OAuth client ID → Desktop app.
 
 ```bash
 pnpm --filter @open-mailtrack/cli build
 openmt auth --server https://t.example.com --api-key <API_KEY> \
-  --client-id <id> --client-secret <secret> --sender-name "Your Name" --sender-email you@gmail.com
+  --sender-name "Your Name" --sender-email you@gmail.com \
+  [--app-password "<16-char-app-password>"] [--client-id <id> --client-secret <secret>]
 
 openmt send --input contacts.csv [--limit 20] [--delay 30] [--cc someone@example.com] [--dry-run]
+openmt status [--since 7d] [--opened | --unopened] [--sender you@gmail.com] [--json]
 ```
 
 Columns: `contact_email`, `subject`, `body`. Attachments in a `files/` folder next to where you run the command are attached to every email.
 
 ## HTTP API
 
-Any sender can use the server directly with `Authorization: Bearer <API_KEY>`:
+All `/api/*` endpoints require `Authorization: Bearer <API_KEY>`:
 
-- `POST /api/messages` `{sender, recipients, subject}` → `{id, pixelUrl}`. Put `<img src="pixelUrl" width="1" height="1">` in the HTML body.
-- `PATCH /api/messages/:id` `{gmailMessageId, gmailThreadId}` after sending, so the extension can show status. Repeated requests preserve the send time. Conflicting Gmail IDs return `409`.
-- `PATCH /api/messages/:id/recover` `{gmailMessageId, gmailThreadId, sender}` restores missing links from a sent message's own pixel. The sender must match the tracking record. Preserves the send time, or uses the registration time if absent. Conflicting Gmail IDs return `409`.
-- `GET /api/messages/:id` for every hit and its classification.
+- `GET /api/accounts` — list connected accounts (never returns secrets)
+- `POST /api/accounts/oauth/start`, `POST /api/accounts/oauth/import`, `POST /api/accounts/app-password`, `DELETE /api/accounts/:email` — manage connected Gmail / Workspace accounts
+- `POST /api/outbox` — enqueue a tracked send (supports `undoDelayMs`, `sendAt`, `isScheduled`, `draftId`, `threadId`, `attachments`, `sync`)
+- `GET /api/outbox`, `PATCH /api/outbox/:id` (reschedule / send now), `DELETE /api/outbox/:id` (cancel and restore Gmail draft)
+- `GET /api/status?messageIds=...&threadIds=...` — message and thread open summaries including `appleMpp` and `recipientSummaries`
+- `GET /api/messages`, `GET /api/messages/:id` — tracked messages and classified hits
+- `GET /api/contacts`, `GET /api/contacts/:email` — per-contact open history and attribution
 
 ## development
 

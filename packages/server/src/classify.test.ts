@@ -82,6 +82,21 @@ describe("classifyHit", () => {
     const sentAt = 1789533183570;
     expect(classifyHit({ at: sentAt + 5_000, user_agent: "Mozilla/5.0 (iPhone) Safari" }, [], { sentAts: [sentAt], otherHitAts: [sentAt + 5_100] }).kind).toBe("open");
   });
+
+  it("classifies bare Mozilla/5.0 from Apple Private Relay IPs as apple_mpp", () => {
+    const isAppleRelayIp = (ip: string | null | undefined) => ip === "172.224.224.5";
+    expect(
+      classifyHit({ at: 5000, ip: "172.224.224.5", user_agent: "Mozilla/5.0" }, [], undefined, { isAppleRelayIp }).kind,
+    ).toBe("apple_mpp");
+    // Same IP with a normal browser UA is a real open (e.g. Safari on iCloud Private Relay)
+    expect(
+      classifyHit({ at: 5000, ip: "172.224.224.5", user_agent: "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15" }, [], undefined, { isAppleRelayIp }).kind,
+    ).toBe("open");
+    // Non-Apple IP with Mozilla/5.0 is not Apple MPP
+    expect(
+      classifyHit({ at: 5000, ip: "1.2.3.4", user_agent: "Mozilla/5.0" }, [], undefined, { isAppleRelayIp }).kind,
+    ).toBe("open");
+  });
 });
 
 describe("summarize", () => {
@@ -91,7 +106,17 @@ describe("summarize", () => {
       { at: 1789501353180, kind: "open", reason: "" },
       { at: 1789501524320, kind: "open", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 3, firstOpenAt: 1789500109100, lastOpenAt: 1789501524320, openAts: [1789500109100, 1789501353180, 1789501524320], late: null });
+    expect(s).toEqual({
+      opens: 3,
+      firstOpenAt: 1789500109100,
+      lastOpenAt: 1789501524320,
+      openAts: [1789500109100, 1789501353180, 1789501524320],
+      late: null,
+      appleMpp: 0,
+      firstAppleMppAt: null,
+      lastAppleMppAt: null,
+      appleMppAts: [],
+    });
   });
 
   it("collapses double fetches within 10 seconds and ignores self views", () => {
@@ -100,11 +125,50 @@ describe("summarize", () => {
       { at: 1800, kind: "open", reason: "" },
       { at: 50_000, kind: "self_view", reason: "" },
     ]);
-    expect(s).toEqual({ opens: 1, firstOpenAt: 1000, lastOpenAt: 1000, openAts: [1000], late: null });
+    expect(s).toEqual({
+      opens: 1,
+      firstOpenAt: 1000,
+      lastOpenAt: 1000,
+      openAts: [1000],
+      late: null,
+      appleMpp: 0,
+      firstAppleMppAt: null,
+      lastAppleMppAt: null,
+      appleMppAts: [],
+    });
+  });
+
+  it("tracks apple_mpp fetches separately without inflating confirmed opens", () => {
+    const s = summarize([
+      { at: 2000, kind: "apple_mpp", reason: "" },
+      { at: 2500, kind: "apple_mpp", reason: "" },
+      { at: 60_000, kind: "apple_mpp", reason: "" },
+    ]);
+    expect(s).toEqual({
+      opens: 0,
+      firstOpenAt: null,
+      lastOpenAt: null,
+      openAts: [],
+      late: null,
+      appleMpp: 2,
+      firstAppleMppAt: 2000,
+      lastAppleMppAt: 60_000,
+      appleMppAts: [2000, 60_000],
+    });
   });
 
   it("is empty with no opens", () => {
-    expect(summarize([])).toEqual({ opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null });
+    expect(summarize([])).toEqual({
+      opens: 0,
+      firstOpenAt: null,
+      lastOpenAt: null,
+      openAts: [],
+      late: null,
+      appleMpp: 0,
+      firstAppleMppAt: null,
+      lastAppleMppAt: null,
+      appleMppAts: [],
+    });
   });
 
   it("flags a first open long after sending and a reopen long after the previous open", () => {

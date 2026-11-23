@@ -16,6 +16,8 @@ export type TrackedMessage = {
   lastOpenAt: number | null;
   openAts: number[];
   late: Late;
+  appleMpp?: number;
+  lastAppleMppAt?: number | null;
 };
 
 const UNITS: Record<string, number> = { m: 60_000, h: 3_600_000, d: 86_400_000, w: 7 * 86_400_000 };
@@ -37,7 +39,14 @@ export function ago(t: number, now = Date.now()): string {
 export function formatTable(messages: TrackedMessage[], now = Date.now()): string {
   if (messages.length === 0) return "No tracked messages.";
   const rows = messages.map((m) => {
-    const opened = m.opens === 0 ? "-" : m.opens === 1 ? `opened ${ago(m.lastOpenAt!, now)}` : `opened ${m.opens}x, last ${ago(m.lastOpenAt!, now)}`;
+    const opened =
+      m.opens === 0
+        ? (m.appleMpp ?? 0) > 0
+          ? `apple proxy ${m.lastAppleMppAt ? ago(m.lastAppleMppAt, now) : ""}`.trim()
+          : "-"
+        : m.opens === 1
+          ? `opened ${ago(m.lastOpenAt!, now)}`
+          : `opened ${m.opens}x, last ${ago(m.lastOpenAt!, now)}`;
     const late = !m.late ? "" : m.late.kind === "after_send" ? `${m.late.days}d after send` : `reopened after ${m.late.days}d`;
     return [m.recipients.join(","), m.subject, `sent ${ago(m.sent_at ?? m.created_at, now)}`, opened, late];
   });

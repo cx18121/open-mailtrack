@@ -11,3 +11,9 @@ chrome.runtime.onInstalled.addListener(async () => {
     console.error("[open-mailtrack] pixel blocking setup failed", err);
   }
 });
+
+chrome.runtime.onMessage?.addListener((msg) => {
+  if (msg?.type === "openOptions") {
+    chrome.runtime.openOptionsPage();
+  }
+});

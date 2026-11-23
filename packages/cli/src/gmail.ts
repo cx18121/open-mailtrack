@@ -3,11 +3,11 @@ import { randomBytes } from "node:crypto";
 import { execFile } from "node:child_process";
 import type { Config } from "./config.js";
 
-const SCOPE = "https://www.googleapis.com/auth/gmail.send";
+const SCOPE = "https://mail.google.com/ https://www.googleapis.com/auth/userinfo.email";
 const REDIRECT_PORT = 8765;
 const REDIRECT_URI = `http://localhost:${REDIRECT_PORT}/callback`;
 
-export async function authorize(google: Config["google"]): Promise<string> {
+export async function authorize(google: { clientId: string; clientSecret: string }): Promise<string> {
   const state = randomBytes(8).toString("hex");
   const url = new URL("https://accounts.google.com/o/oauth2/v2/auth");
   url.search = new URLSearchParams({
@@ -49,7 +49,7 @@ export async function authorize(google: Config["google"]): Promise<string> {
   return token.refresh_token;
 }
 
-export async function accessToken(google: Config["google"]): Promise<string> {
+export async function accessToken(google: { clientId: string; clientSecret: string; refreshToken?: string }): Promise<string> {
   if (!google.refreshToken) throw new Error("Not authorized. Run `openmt auth`.");
   const token = await postToken({
     client_id: google.clientId,

@@ -12,10 +12,14 @@
   },
   "dependencies": {
     "@hono/node-server": "^2.1.1",
-    "hono": "^4.13.8"
+    "hono": "^4.13.8",
+    "imapflow": "^2.12.2",
+    "nodemailer": "^10.6.1",
+    "postal-mime": "^4.2.1"
   },
   "devDependencies": {
     "@types/node": "^26.6.0",
+    "@types/nodemailer": "^8.0.2",
     "tsx": "^4.23.13",
     "vitest": "^5.0.1"
   }

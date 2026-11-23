@@ -7,7 +7,7 @@ export type Config = {
   apiKey: string;
   senderName: string;
   senderEmail: string;
-  google: {
+  google?: {
     clientId: string;
     clientSecret: string;
     refreshToken?: string;

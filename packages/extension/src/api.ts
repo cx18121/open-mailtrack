@@ -2,7 +2,35 @@ import type { Settings } from "./settings.js";
 
 export type Registration = { id: string; sender: string; recipients: string[]; subject: string };
 export type Late = { kind: "after_send" | "after_previous"; days: number } | null;
-export type OpenSummary = { opens: number; firstOpenAt: number | null; lastOpenAt: number | null; openAts: number[]; late: Late };
+
+export type OpenSummary = {
+  opens: number;
+  firstOpenAt: number | null;
+  lastOpenAt: number | null;
+  openAts: number[];
+  late: Late;
+  appleMpp?: number;
+  firstAppleMppAt?: number | null;
+  lastAppleMppAt?: number | null;
+  appleMppAts?: number[];
+  trackingMode?: "legacy" | "per_recipient";
+  recipientSummaries?: RecipientOpenSummary[];
+};
+
+export type RecipientOpenSummary = {
+  recipient: string;
+  kind: "to" | "cc" | "bcc";
+  opens: number;
+  firstOpenAt: number | null;
+  lastOpenAt: number | null;
+  openAts: number[];
+  late: Late;
+  appleMpp?: number;
+  firstAppleMppAt?: number | null;
+  lastAppleMppAt?: number | null;
+  appleMppAts?: number[];
+};
+
 export type TrackedMessage = OpenSummary & {
   id: string;
   subject: string;
@@ -11,17 +39,122 @@ export type TrackedMessage = OpenSummary & {
   sent_at: number | null;
   created_at: number;
 };
-export type ThreadSummary = { tracked: number; opens: number; lastOpenAt: number | null; late: Late };
+
+export type ThreadSummary = {
+  tracked: number;
+  opens: number;
+  lastOpenAt: number | null;
+  late: Late;
+  appleMpp?: number;
+  lastAppleMppAt?: number | null;
+  recipientCount?: number;
+  openedRecipients?: number;
+  openedRecipientEmails?: string[];
+};
+
 export type Status = { messages: Record<string, OpenSummary>; threads: Record<string, ThreadSummary> };
 
-export function createApi(settings: Settings) {
+export type ConnectedAccount = {
+  email: string;
+  authType: "oauth" | "app_password";
+  displayName: string | null;
+  connectedAt: number;
+  updatedAt: number;
+};
+
+export type AccountsResponse = {
+  accounts: ConnectedAccount[];
+  hasServerGoogleClient: boolean;
+};
+
+export type OutboxEnqueueRequest = {
+  sender: string;
+  from?: string;
+  to: string[];
+  cc?: string[];
+  bcc?: string[];
+  subject: string;
+  html: string;
+  text?: string;
+  threadId?: string | null;
+  draftId?: string | null;
+  draftMessageId?: string | null;
+  hasAttachments?: boolean;
+  clientRequestId?: string;
+  sendAt?: number;
+  undoDelayMs?: number;
+  isScheduled?: boolean;
+};
+
+export type OutboxEnqueueResponse = {
+  outboxId: string;
+  messageId: string;
+  sendAt: number;
+  remainingMs?: number;
+  status: "queued" | "sent";
+};
+
+export type OutboxItem = {
+  id: string;
+  accountEmail: string;
+  messageId: string;
+  status: "queued" | "sending" | "sent" | "canceled" | "failed";
+  sendAt: number;
+  isScheduled: boolean;
+  subject: string;
+  recipients: { to: string[]; cc: string[]; bcc: string[] };
+  threadId: string | null;
+  error: string | null;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type ContactSummary = {
+  email: string;
+  messages: number;
+  attributableMessages: number;
+  openedMessages: number;
+  appleMppMessages: number;
+  totalOpens: number;
+  lastOpenAt: number | null;
+  lastSentAt: number | null;
+};
+
+export type ContactMessageEntry = {
+  id: string;
+  subject: string;
+  recipients: string[];
+  gmail_thread_id: string | null;
+  sent_at: number | null;
+  created_at: number;
+  attribution: "individual" | "group_unknown";
+  opens: number;
+  firstOpenAt: number | null;
+  lastOpenAt: number | null;
+  openAts: number[];
+  late: Late;
+  appleMpp: number;
+  lastAppleMppAt: number | null;
+  appleMppAts: number[];
+};
+
+export function createApi(settings: Pick<Settings, "serverUrl" | "apiKey">) {
   async function call(path: string, method: string, body?: unknown) {
     const res = await fetch(`${settings.serverUrl}/api${path}`, {
       method,
       headers: { authorization: `Bearer ${settings.apiKey}`, "content-type": "application/json" },
       body: body === undefined ? undefined : JSON.stringify(body),
     });
-    if (!res.ok) throw new Error(`open-mailtrack ${method} ${path}: HTTP ${res.status}`);
+    if (!res.ok) {
+      let detail = "";
+      try {
+        const err = (await res.json()) as { error?: string };
+        if (err.error) detail = `: ${err.error}`;
+      } catch {
+        // ignore non-json errors
+      }
+      throw new Error(`open-mailtrack ${method} ${path} (HTTP ${res.status})${detail}`);
+    }
     return res;
   }
 
@@ -39,6 +172,37 @@ export function createApi(settings: Settings) {
     list: async (sender: string, offset: number, limit: number): Promise<{ total: number; messages: TrackedMessage[] }> => {
       const q = new URLSearchParams({ sender, offset: String(offset), limit: String(limit) });
       return (await call(`/messages?${q}`, "GET")).json();
+    },
+
+    // Accounts
+    accounts: async (): Promise<AccountsResponse> => (await call("/accounts", "GET")).json(),
+    startOAuth: async (body: { clientId?: string; clientSecret?: string; emailHint?: string; displayName?: string }): Promise<{ authUrl: string }> =>
+      (await call("/accounts/oauth/start", "POST", body)).json(),
+    connectAppPassword: async (body: { email: string; appPassword: string; displayName?: string }): Promise<{ account: ConnectedAccount }> =>
+      (await call("/accounts/app-password", "POST", body)).json(),
+    disconnectAccount: (email: string) => call(`/accounts/${encodeURIComponent(email)}`, "DELETE"),
+
+    // Unified Outbox (Undo Send + Schedule Send)
+    enqueueOutbox: async (req: OutboxEnqueueRequest): Promise<OutboxEnqueueResponse> =>
+      (await call("/outbox", "POST", req)).json(),
+    listOutbox: async (sender: string): Promise<{ items: OutboxItem[] }> => {
+      const q = new URLSearchParams({ sender });
+      return (await call(`/outbox?${q}`, "GET")).json();
+    },
+    cancelOutbox: async (id: string, restoreDraft = true): Promise<{ canceled: boolean; draftId: string | null; draftMessageId: string | null }> =>
+      (await call(`/outbox/${encodeURIComponent(id)}?restoreDraft=${restoreDraft}`, "DELETE")).json(),
+    rescheduleOutbox: async (id: string, sendAt: number): Promise<{ outboxId: string; sendAt: number; status: string }> =>
+      (await call(`/outbox/${encodeURIComponent(id)}`, "PATCH", { sendAt })).json(),
+
+    // Contacts
+    listContacts: async (sender: string, q = ""): Promise<{ total: number; contacts: ContactSummary[] }> => {
+      const params = new URLSearchParams({ sender });
+      if (q) params.set("q", q);
+      return (await call(`/contacts?${params}`, "GET")).json();
+    },
+    getContact: async (email: string, sender: string): Promise<{ contact: ContactSummary; messages: ContactMessageEntry[] }> => {
+      const params = new URLSearchParams({ sender });
+      return (await call(`/contacts/${encodeURIComponent(email)}?${params}`, "GET")).json();
     },
   };
 }

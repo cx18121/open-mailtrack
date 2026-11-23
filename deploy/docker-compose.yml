@@ -7,6 +7,9 @@ services:
     environment:
       API_KEY: ${API_KEY:?set API_KEY in deploy/.env}
       PUBLIC_URL: ${PUBLIC_URL:?set PUBLIC_URL in deploy/.env}
+      TOKEN_ENCRYPTION_KEY: ${TOKEN_ENCRYPTION_KEY:-}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
     volumes:
       - data:/data
     ports:

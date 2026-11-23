@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 import { parseArgs } from "node:util";
 import { configPath, readConfig, writeConfig, type Config } from "./config.js";
-import { accessToken, authorize, sendRaw } from "./gmail.js";
+import { authorize } from "./gmail.js";
 import { attachmentPaths, readRows } from "./input.js";
-import { buildRaw } from "./mime.js";
+import { textToHtml } from "./mime.js";
 import { status } from "./status.js";
-import { createTracked, markSent } from "./tracker.js";
+import { connectAppPasswordAccount, connectOAuthAccount, sendViaOutbox } from "./tracker.js";
 
 const usage = `openmt <command>
 
-  auth   Configure the server and Google credentials, then sign in to Gmail
-         --server <url> --api-key <key> --client-id <id> --client-secret <secret>
-         --sender-name <name> --sender-email <email>
-  send   Send tracked mail from a CSV or XLSX with columns contact_email, subject, body.
+  auth   Configure the CLI and optionally connect a Gmail / Workspace account on the server
+         --server <url> --api-key <key> --sender-name <name> --sender-email <email>
+         [--client-id <id> --client-secret <secret>] [--app-password <16-char-password>]
+  send   Send tracked mail from a CSV or XLSX via your server's unified SMTP pipeline
+         (pixel-free Sent copy + per-recipient tracking even with --cc).
          Every file in ./files is attached to every email.
          --input <file> [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
   status Tracked messages, most recently opened first
@@ -27,6 +28,7 @@ async function auth(argv: string[]) {
       "api-key": { type: "string" },
       "client-id": { type: "string" },
       "client-secret": { type: "string" },
+      "app-password": { type: "string" },
       "sender-name": { type: "string" },
       "sender-email": { type: "string" },
     },
@@ -40,22 +42,38 @@ async function auth(argv: string[]) {
     apiKey: values["api-key"] ?? existing?.apiKey ?? "",
     senderName: values["sender-name"] ?? existing?.senderName ?? "",
     senderEmail: values["sender-email"] ?? existing?.senderEmail ?? "",
-    google: {
-      clientId: values["client-id"] ?? existing?.google.clientId ?? "",
-      clientSecret: values["client-secret"] ?? existing?.google.clientSecret ?? "",
-    },
   };
   for (const [k, v] of [
     ["--server", config.serverUrl],
     ["--api-key", config.apiKey],
-    ["--client-id", config.google.clientId],
-    ["--client-secret", config.google.clientSecret],
     ["--sender-name", config.senderName],
     ["--sender-email", config.senderEmail],
   ]) {
     if (!v) throw new Error(`${k} is required`);
   }
-  config.google.refreshToken = await authorize(config.google);
+
+  if (values["app-password"]) {
+    await connectAppPasswordAccount(config, {
+      email: config.senderEmail,
+      appPassword: values["app-password"],
+      displayName: config.senderName,
+    });
+    console.log(`Connected ${config.senderEmail} on server via App Password.`);
+  } else if (values["client-id"] && values["client-secret"]) {
+    const refreshToken = await authorize({
+      clientId: values["client-id"],
+      clientSecret: values["client-secret"],
+    });
+    await connectOAuthAccount(config, {
+      email: config.senderEmail,
+      clientId: values["client-id"],
+      clientSecret: values["client-secret"],
+      refreshToken,
+      displayName: config.senderName,
+    });
+    console.log(`Connected ${config.senderEmail} on server via Google OAuth.`);
+  }
+
   writeConfig(config);
   console.log(`Saved ${configPath}`);
 }
@@ -81,10 +99,9 @@ async function send(argv: string[]) {
   const delayMs = Number(values.delay) * 1000;
   const from = `${config.senderName} <${config.senderEmail}>`;
 
-  console.log(`Sending ${batch.length} emails via Gmail (${dryRun ? "DRY RUN" : "LIVE"})`);
+  console.log(`Sending ${batch.length} emails via open-mailtrack server (${dryRun ? "DRY RUN" : "LIVE"})`);
   if (attachments.length) console.log(`Attaching ${attachments.join(", ")}`);
   console.log();
-  const token = dryRun ? "" : await accessToken(config.google);
   let sent = 0;
   let failed = 0;
 
@@ -102,19 +119,25 @@ async function send(argv: string[]) {
       continue;
     }
     try {
-      const tracked = await createTracked(config, {
+      const result = await sendViaOutbox(config, {
         sender: config.senderEmail,
-        recipients: [to, ...(values.cc ? [values.cc] : [])],
+        from,
+        to: [to],
+        cc: values.cc ? [values.cc] : [],
         subject,
+        html: `<div>${textToHtml(body)}</div>`,
+        text: body,
+        attachmentPaths: attachments,
       });
-      const result = await sendRaw(token, buildRaw({ from, to, cc: values.cc, subject, text: body, pixelUrl: tracked.pixelUrl, attachments }));
-      await markSent(config, tracked.id, result);
-      console.log(`${label} sent (${tracked.id})`);
+      if (result.status !== "sent") {
+        throw new Error(`Unexpected server outbox status: ${result.status}`);
+      }
+      console.log(`${label} sent (${result.messageId})`);
       sent++;
     } catch (err) {
       console.log(`${label} failed: ${(err as Error).message}`);
       failed++;
-      if (/HTTP 40[13]/.test((err as Error).message)) break;
+      if (/HTTP 40[13]|HTTP 412/.test((err as Error).message)) break;
     }
     if (i < batch.length - 1) await sleep(delayMs);
   }

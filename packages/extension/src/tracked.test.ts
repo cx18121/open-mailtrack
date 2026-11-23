@@ -1,6 +1,6 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { TrackedMessage } from "./api.js";
-import { rowText, trackedList, type ListState } from "./tracked.js";
+import { contactDetailView, contactsList, rowText, scheduledList, trackedList, type ListState } from "./tracked.js";
 
 const now = new Date("2026-09-15T20:00:00").getTime();
 const h = (n: number) => now - n * 3_600_000;
@@ -93,5 +93,75 @@ describe("trackedList", () => {
   it("has empty states", () => {
     expect(trackedList(document, [], state()).textContent).toContain("No tracked messages yet");
     expect(trackedList(document, [msg({})], state({ filter: "opened" })).textContent).toContain("Nothing here right now");
+  });
+
+  it("renders scheduled sends with Send now and Cancel actions", () => {
+    const onSendNow = vi.fn();
+    const onCancel = vi.fn();
+    const item = {
+      id: "ob1",
+      accountEmail: "me@cornell.edu",
+      messageId: "m1",
+      status: "queued" as const,
+      sendAt: now + 3_600_000,
+      isScheduled: true,
+      subject: "Follow up",
+      recipients: { to: ["alice@example.com"], cc: [], bcc: [] },
+      threadId: null,
+      error: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const el = scheduledList(document, [item], { onSendNow, onReschedule: () => {}, onCancel }, now);
+    const buttons = el.querySelectorAll<HTMLButtonElement>("button");
+    buttons[0].click();
+    buttons[1].click();
+    expect(onSendNow).toHaveBeenCalledWith(item);
+    expect(onCancel).toHaveBeenCalledWith(item);
+  });
+
+  it("renders contacts directory and contact detail with legacy group attribution", () => {
+    const onSelect = vi.fn();
+    const contact = {
+      email: "alice@example.com",
+      messages: 2,
+      attributableMessages: 1,
+      openedMessages: 1,
+      appleMppMessages: 0,
+      totalOpens: 2,
+      lastOpenAt: h(1),
+      lastSentAt: h(2),
+    };
+    const listEl = contactsList(document, [contact], { query: "", onQuery: () => {}, onSelect }, now);
+    expect(listEl.textContent).toContain("1 of 1 opened");
+    listEl.querySelector<HTMLButtonElement>(".omt-contact-item")!.click();
+    expect(onSelect).toHaveBeenCalledWith("alice@example.com");
+
+    const detailEl = contactDetailView(
+      document,
+      contact,
+      [
+        {
+          id: "m1",
+          subject: "Old group",
+          recipients: ["alice@example.com", "bob@example.com"],
+          gmail_thread_id: "t1",
+          sent_at: h(4),
+          created_at: h(4),
+          attribution: "group_unknown",
+          opens: 1,
+          firstOpenAt: h(3),
+          lastOpenAt: h(3),
+          openAts: [h(3)],
+          late: null,
+          appleMpp: 0,
+          lastAppleMppAt: null,
+          appleMppAts: [],
+        },
+      ],
+      { onBack: () => {}, onOpenThread: () => {} },
+      now,
+    );
+    expect(detailEl.textContent).toContain("Opened (group, recipient unknown)");
   });
 });

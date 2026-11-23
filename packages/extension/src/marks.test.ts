@@ -77,4 +77,48 @@ describe("statusElement", () => {
     const el = statusElement(document, { ...opened(h(1)), late: { kind: "after_send", days: 4 } }, now);
     expect(el.querySelector(".omt-status-late")!.textContent).toBe("4 days after sending");
   });
+
+  it("renders Apple Mail privacy proxy distinctly without green checkmarks", () => {
+    const s: OpenSummary = {
+      opens: 0,
+      firstOpenAt: null,
+      lastOpenAt: null,
+      openAts: [],
+      late: null,
+      appleMpp: 1,
+      firstAppleMppAt: h(1),
+      lastAppleMppAt: h(1),
+      appleMppAts: [h(1)],
+    };
+    const el = statusElement(document, s, now);
+    expect(el.querySelector("img")!.src).toContain("apple-proxy.svg");
+    expect(el.textContent).toContain("Apple Mail privacy proxy");
+    expect(el.textContent).toContain("may have been opened");
+  });
+
+  it("renders per-recipient breakdown for group emails with clickable contact links", () => {
+    const onContactClick = vi.fn();
+    const s: OpenSummary = {
+      opens: 1,
+      firstOpenAt: h(1),
+      lastOpenAt: h(1),
+      openAts: [h(1)],
+      late: null,
+      appleMpp: 1,
+      lastAppleMppAt: h(2),
+      appleMppAts: [h(2)],
+      trackingMode: "per_recipient",
+      recipientSummaries: [
+        { recipient: "alice@example.com", kind: "to", opens: 1, firstOpenAt: h(1), lastOpenAt: h(1), openAts: [h(1)], late: null },
+        { recipient: "bob@example.com", kind: "cc", opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null, appleMpp: 1, lastAppleMppAt: h(2), appleMppAts: [h(2)] },
+        { recipient: "carol@example.com", kind: "bcc", opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null },
+      ],
+    };
+    const el = statusElement(document, s, now, { expanded: true, onToggle: () => {} }, { onContactClick });
+    expect(el.textContent).toContain("1 of 3 opened");
+    const links = el.querySelectorAll<HTMLButtonElement>(".omt-contact-link");
+    expect(links).toHaveLength(3);
+    links[1].click();
+    expect(onContactClick).toHaveBeenCalledWith("bob@example.com");
+  });
 });

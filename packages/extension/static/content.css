@@ -202,3 +202,212 @@
 .omt-chip-active .omt-chip-count {
   color: #041e49;
 }
+
+.omt-status-mpp {
+  color: #4e6d94;
+}
+.omt-tracked-mpp .omt-tracked-status {
+  color: #4e6d94;
+}
+
+.omt-recipient-list {
+  margin: 4px 0 0 26px;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.omt-recipient-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 20px;
+}
+.omt-recipient-row img {
+  width: 16px;
+  height: 14px;
+  flex: none;
+}
+.omt-contact-link {
+  padding: 0 3px;
+  border: 0;
+  border-radius: 3px;
+  background: none;
+  font: inherit;
+  color: #0b57d0;
+  cursor: pointer;
+  text-align: left;
+}
+.omt-contact-link:hover {
+  text-decoration: underline;
+  background: rgba(11, 87, 208, 0.08);
+}
+.omt-recipient-kind {
+  font-size: 10px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: #f1f3f4;
+  color: #5f6368;
+}
+.omt-recipient-detail {
+  color: #5f6368;
+}
+
+.omt-tabs {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 16px 0;
+  border-bottom: 1px solid #e3e3e3;
+}
+.omt-tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 14px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  color: #5f6368;
+  cursor: pointer;
+}
+.omt-tab:hover {
+  color: #1f1f1f;
+  background: rgba(60, 64, 67, 0.04);
+}
+.omt-tab-active {
+  color: #0b57d0;
+  border-bottom-color: #0b57d0;
+}
+
+.omt-scheduled-item {
+  border-bottom: 1px solid #e3e3e3;
+  padding: 10px 16px 10px 24px;
+}
+.omt-scheduled-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.omt-scheduled-error {
+  font-size: 12px;
+  color: #b3261e;
+}
+.omt-scheduled-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+.omt-btn {
+  padding: 4px 10px;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  background: #fff;
+  font: inherit;
+  font-size: 12px;
+  color: #1f1f1f;
+  cursor: pointer;
+}
+.omt-btn:hover {
+  background: #f2f6fc;
+}
+.omt-btn-danger {
+  color: #b3261e;
+}
+.omt-datetime {
+  padding: 3px 6px;
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  font: inherit;
+  font-size: 12px;
+}
+
+.omt-search {
+  width: 280px;
+  padding: 6px 10px;
+  border: 1px solid #dadce0;
+  border-radius: 16px;
+  font: inherit;
+  font-size: 13px;
+}
+.omt-contact-item {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  padding: 10px 24px;
+  border: 0;
+  border-bottom: 1px solid #e3e3e3;
+  background: #fff;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+.omt-contact-item:hover {
+  background: #f2f6fc;
+}
+.omt-contact-email {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 500;
+}
+.omt-contact-rate {
+  font-size: 12px;
+  color: #5f6368;
+}
+.omt-contact-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px 12px;
+}
+.omt-contact-title {
+  font-size: 15px;
+}
+
+.omt-schedule-modal {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 300px;
+  font-size: 13px;
+}
+.omt-schedule-presets {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.omt-schedule-preset {
+  display: flex;
+  justify-content: space-between;
+  padding: 8px 10px;
+  border: 1px solid #dadce0;
+  border-radius: 6px;
+  background: #fff;
+  font: inherit;
+  cursor: pointer;
+}
+.omt-schedule-preset:hover {
+  background: #f2f6fc;
+}
+.omt-compose-notice {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 12px;
+  font-size: 12px;
+  background: #fef7e0;
+  color: #7c4a00;
+}
+

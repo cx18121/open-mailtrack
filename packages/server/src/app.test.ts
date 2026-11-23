@@ -84,7 +84,15 @@ describe("pixel", () => {
     expect(detail.opens).toBe(0);
 
     const status = await (await app.request("/api/status?messageIds=gm1,unknown&threadIds=gt1", { headers: auth })).json();
-    expect(status.messages).toEqual({ gm1: { opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null } });
+    expect(status.messages.gm1).toMatchObject({
+      opens: 0,
+      firstOpenAt: null,
+      lastOpenAt: null,
+      openAts: [],
+      late: null,
+      appleMpp: 0,
+      trackingMode: "legacy",
+    });
     expect(status.threads.gt1).toMatchObject({ tracked: 1, opens: 0 });
   });
 
@@ -126,7 +134,7 @@ describe("pixel", () => {
     expect(await detail()).toMatchObject({ opens: 1, firstOpenAt: openAt, lastOpenAt: openAt, openAts: [openAt] });
     expect((await list()).messages[0]).toMatchObject({ opens: 1, hits: 2 });
     const opened = await status();
-    expect(opened.classifierVersion).toBe(5);
+    expect(opened.classifierVersion).toBe(6);
     expect(opened.messages.gm1.opens).toBe(1);
     expect(opened.threads.gt1).toMatchObject({ tracked: 1, opens: 1, lastOpenAt: openAt });
   });
