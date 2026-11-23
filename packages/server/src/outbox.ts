@@ -89,7 +89,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
   const { db, cipher } = opts;
   const publicUrl = opts.publicUrl.replace(/\/$/, "");
   const getTransport = (account: Account) => (opts.transportFactory ?? defaultTransportFactory)(account, cipher);
-  const pollMs = opts.pollMs ?? 1000;
+  const pollMs = opts.pollMs ?? 500;
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let inFlight: Promise<void> | null = null;
@@ -300,7 +300,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
             }
             inReplyTo ??= parsed.inReplyTo;
             references ??= parsed.references;
-            threadId ??= draft.threadId ?? null;
+            if (parsed.inReplyTo) threadId ??= draft.threadId ?? null;
           } else if (req.hasAttachments && attachments.length === 0) {
             throw new OutboxError(
               502,

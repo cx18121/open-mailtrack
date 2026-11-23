@@ -217,7 +217,8 @@ async function main() {
         const from = fromContact?.emailAddress ? formatContact(fromContact) : me;
         const html = compose.getHTMLContent?.() ?? compose.getBodyElement().innerHTML;
         const subject = compose.getSubject();
-        const threadId = compose.getThreadID?.() || null;
+        // Only attach threadId for actual replies; on brand-new compose windows, getThreadID() is the ephemeral draft thread.
+        const threadId = compose.isReply?.() ? compose.getThreadID?.() || null : null;
         const composeEl = compose.getElement?.();
         const hasAttachments = Boolean(
           composeEl?.querySelector('[data-tooltip*="Remove attachment"], [aria-label*="Remove attachment"], .vI, .dL'),

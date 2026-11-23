@@ -215,14 +215,16 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
     },
 
     async createDraft(raw: Buffer, threadId?: string | null): Promise<{ draftId: string; messageId: string }> {
-      const body: { message: { raw: string; threadId?: string } } = {
-        message: { raw: raw.toString("base64url") },
-      };
-      if (threadId) body.message.threadId = threadId;
-      const data = await gmailJson<{ id: string; message: { id: string } }>("/drafts", {
-        method: "POST",
-        body: JSON.stringify(body),
-      });
+      const rawB64 = raw.toString("base64url");
+      const post = (tid?: string | null) =>
+        gmailFetch("/drafts", {
+          method: "POST",
+          body: JSON.stringify({ message: tid ? { raw: rawB64, threadId: tid } : { raw: rawB64 } }),
+        });
+      let res = await post(threadId);
+      if (res.status === 404 && threadId) res = await post(null);
+      if (!res.ok) throw new Error(`Gmail API POST /drafts: HTTP ${res.status} ${await res.text()}`);
+      const data = (await res.json()) as { id: string; message: { id: string } };
       return { draftId: data.id, messageId: data.message.id };
     },
 
@@ -241,15 +243,21 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
 
     async replaceSentCopies(args: ReplaceSentArgs): Promise<{ gmailMessageId: string; gmailThreadId: string }> {
       // 1. Insert the clean, pixel-free copy into SENT first so the thread never looks missing.
-      const insertBody: { raw: string; labelIds: string[]; threadId?: string } = {
-        raw: args.cleanRaw.toString("base64url"),
-        labelIds: ["SENT"],
-      };
-      if (args.threadId) insertBody.threadId = args.threadId;
-      const inserted = await gmailJson<{ id: string; threadId: string }>(
-        "/messages?internalDateSource=dateHeader",
-        { method: "POST", body: JSON.stringify(insertBody) },
-      );
+      // If threadId came from a deleted brand-new draft, Gmail returns 404; retry cleanly without threadId.
+      const rawB64 = args.cleanRaw.toString("base64url");
+      const insertMsg = (tid?: string | null) =>
+        gmailFetch("/messages?internalDateSource=dateHeader", {
+          method: "POST",
+          body: JSON.stringify(tid ? { raw: rawB64, labelIds: ["SENT"], threadId: tid } : { raw: rawB64, labelIds: ["SENT"] }),
+        });
+      let insertRes = await insertMsg(args.threadId);
+      if (insertRes.status === 404 && args.threadId) {
+        insertRes = await insertMsg(null);
+      }
+      if (!insertRes.ok) {
+        throw new Error(`Gmail API POST /messages?internalDateSource=dateHeader: HTTP ${insertRes.status} ${await insertRes.text()}`);
+      }
+      const inserted = (await insertRes.json()) as { id: string; threadId: string };
 
       // 2. Locate the N auto-saved SMTP copies in SENT and move them reversibly to Trash.
       const toTrash = new Set<string>();

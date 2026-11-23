@@ -96,6 +96,7 @@ function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}
     getBodyElement: () => body,
     getHTMLContent: () => body.innerHTML,
     getSubject: () => "Hello",
+    isReply: () => true,
     getThreadID: () => "gt1",
     getCurrentDraftID: async () => "draft-123",
     getInitialMessageID: () => "dmsg-orig",
