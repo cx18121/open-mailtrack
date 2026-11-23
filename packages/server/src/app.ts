@@ -26,6 +26,7 @@ import {
   type OutboxService,
   type TransportFactory,
 } from "./outbox.js";
+import { createReplyChecker, type ReplyChecker } from "./replies.js";
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 export const newId = () => randomBytes(16).toString("base64url");
@@ -84,6 +85,11 @@ export function createApp(db: Db, config: Config) {
     publicUrl,
     transportFactory,
     pollMs: config.outboxPollMs,
+  });
+  const replyChecker: ReplyChecker = createReplyChecker({
+    db,
+    cipher,
+    transportFactory,
   });
 
   const pendingOAuth = new Map<string, PendingOAuthState>();
@@ -776,6 +782,21 @@ export function createApp(db: Db, config: Config) {
     return contacts;
   }
 
+  api.post("/messages/:id/dismiss-followup", async (c) => {
+    const id = c.req.param("id");
+    const body = await c.req.json<{ dismissed?: boolean }>().catch(() => ({ dismissed: true }));
+    const dismissed = body.dismissed !== false;
+    const ok = db.setFollowupDismissed(id, dismissed ? Date.now() : null);
+    if (!ok) return c.json({ error: "not found" }, 404);
+    return c.body(null, 204);
+  });
+
+  api.post("/followups/refresh", async (c) => {
+    const body = await c.req.json<{ sender?: string; force?: boolean }>().catch(() => ({} as { sender?: string; force?: boolean }));
+    const result = await replyChecker.check({ sender: body.sender, force: body.force !== false });
+    return c.json(result);
+  });
+
   api.get("/contacts", (c) => {
     const sender = c.req.query("sender")?.toLowerCase();
     const q = c.req.query("q")?.trim().toLowerCase() ?? "";
@@ -797,5 +818,5 @@ export function createApp(db: Db, config: Config) {
 
   app.route("/api", api);
 
-  return Object.assign(app, { outbox, appleRelay, cipher });
+  return Object.assign(app, { outbox, replyChecker, appleRelay, cipher });
 }

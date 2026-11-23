@@ -24,11 +24,21 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
 }
 
 export type Section = "messages" | "scheduled" | "contacts";
-export type Filter = "all" | "opened" | "unopened";
+export type Filter = "all" | "opened" | "unopened" | "followup";
+const FOLLOWUP_MIN_AGE_MS = 24 * 3_600_000;
+const FOLLOWUP_MAX_AGE_MS = 30 * 86_400_000;
+
+export function needsFollowup(m: TrackedMessage, now = Date.now()): boolean {
+  if (m.replied_at || m.followup_dismissed_at) return false;
+  const age = now - (m.sent_at ?? m.created_at);
+  return age >= FOLLOWUP_MIN_AGE_MS && age <= FOLLOWUP_MAX_AGE_MS;
+}
+
 const FILTERS: { key: Filter; label: string }[] = [
   { key: "all", label: "All" },
   { key: "opened", label: "Opened" },
   { key: "unopened", label: "Not opened" },
+  { key: "followup", label: "Needs follow-up" },
 ];
 
 export type ListState = {
@@ -39,6 +49,8 @@ export type ListState = {
   onOpen: (message: TrackedMessage) => void;
   onToggle: (id: string) => void;
   onContactClick?: (email: string) => void;
+  onDismissFollowup?: (id: string) => void;
+  onCheckReplies?: () => void;
 };
 
 export function sectionBar(
@@ -77,7 +89,7 @@ export function sectionBar(
 export function trackedList(
   doc: Document,
   all: TrackedMessage[],
-  { filter, expanded, onFilter, onOpen, onToggle, onContactClick }: ListState,
+  { filter, expanded, onFilter, onOpen, onToggle, onContactClick, onDismissFollowup, onCheckReplies }: ListState,
   now = Date.now(),
 ): HTMLElement {
   const root = doc.createElement("div");
@@ -87,7 +99,12 @@ export function trackedList(
   bar.className = "omt-chips";
   bar.setAttribute("role", "tablist");
   for (const f of FILTERS) {
-    const count = f.key === "all" ? all.length : all.filter((m) => (f.key === "opened") === m.opens > 0).length;
+    const count =
+      f.key === "all"
+        ? all.length
+        : f.key === "followup"
+          ? all.filter((m) => needsFollowup(m, now)).length
+          : all.filter((m) => (f.key === "opened") === m.opens > 0).length;
     const chip = doc.createElement("button");
     chip.type = "button";
     chip.className = `omt-chip${f.key === filter ? " omt-chip-active" : ""}`;
@@ -102,15 +119,44 @@ export function trackedList(
     chip.addEventListener("click", () => onFilter(f.key));
     bar.append(chip);
   }
+  if (filter === "followup" && onCheckReplies) {
+    const refresh = doc.createElement("button");
+    refresh.type = "button";
+    refresh.className = "omt-btn omt-followup-refresh";
+    refresh.textContent = "Check replies";
+    refresh.addEventListener("click", () => onCheckReplies());
+    bar.append(refresh);
+  }
   root.append(bar);
 
-  const messages = filter === "all" ? all : all.filter((m) => (filter === "opened") === m.opens > 0);
-  if (filter === "unopened") messages.sort((a, b) => (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at));
+  const messages =
+    filter === "all"
+      ? [...all]
+      : filter === "followup"
+        ? all.filter((m) => needsFollowup(m, now))
+        : all.filter((m) => (filter === "opened") === m.opens > 0);
+  if (filter === "unopened") {
+    messages.sort((a, b) => (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at));
+  } else if (filter === "followup") {
+    // Show opened-without-reply leads first (most recently opened), then unopened oldest first.
+    messages.sort((a, b) => {
+      const aOpened = a.opens > 0 ? 1 : 0;
+      const bOpened = b.opens > 0 ? 1 : 0;
+      if (aOpened !== bOpened) return bOpened - aOpened;
+      if (aOpened) return (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0);
+      return (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at);
+    });
+  }
 
   if (messages.length === 0) {
     const empty = doc.createElement("p");
     empty.className = "omt-tracked-empty";
-    empty.textContent = all.length === 0 ? "No tracked messages yet. Send one from Gmail or with openmt." : "Nothing here right now.";
+    empty.textContent =
+      all.length === 0
+        ? "No tracked messages yet. Send one from Gmail or with openmt."
+        : filter === "followup"
+          ? "No emails waiting for a reply right now."
+          : "Nothing here right now.";
     root.append(empty);
     return root;
   }
@@ -156,6 +202,12 @@ export function trackedList(
     status.textContent = rowText(m, now);
 
     row.append(img, to, subject);
+    if (m.replied_at) {
+      const pill = doc.createElement("span");
+      pill.className = "omt-replied-pill";
+      pill.textContent = "Replied";
+      row.append(pill);
+    }
     const late = lateText(m.late);
     if (late) {
       const badge = doc.createElement("span");
@@ -165,6 +217,19 @@ export function trackedList(
     }
     row.append(status);
     head.append(row);
+
+    if (filter === "followup" && onDismissFollowup) {
+      const dismiss = doc.createElement("button");
+      dismiss.type = "button";
+      dismiss.className = "omt-btn omt-dismiss-btn";
+      dismiss.textContent = "Dismiss";
+      dismiss.title = "Dismiss from Needs follow-up";
+      dismiss.addEventListener("click", (e) => {
+        e.stopPropagation();
+        onDismissFollowup(m.id);
+      });
+      head.append(dismiss);
+    }
 
     const hasDetails =
       m.opens > 0 || (m.appleMpp ?? 0) > 0 || (m.recipientSummaries !== undefined && m.recipientSummaries.length > 1);
@@ -452,5 +517,98 @@ export function contactDetailView(
     list.append(item);
   }
   root.append(list);
+  return root;
+}
+
+export type ThreadContactRecord = {
+  contact: ContactSummary;
+  messages: ContactMessageEntry[];
+};
+
+/** Compact per-contact open history rendered inside Gmail's thread sidebar panel. */
+export function contactSidebarCard(
+  doc: Document,
+  records: ThreadContactRecord[],
+  opts: {
+    onOpenContact: (email: string) => void;
+    onOpenThread: (entry: ContactMessageEntry) => void;
+  },
+  now = Date.now(),
+): HTMLElement {
+  const root = doc.createElement("div");
+  root.className = "omt-sidebar-contacts";
+
+  for (const { contact, messages } of records) {
+    const card = doc.createElement("div");
+    card.className = "omt-sidebar-card";
+
+    const head = doc.createElement("div");
+    head.className = "omt-sidebar-card-head";
+    const emailBtn = doc.createElement("button");
+    emailBtn.type = "button";
+    emailBtn.className = "omt-contact-link omt-sidebar-email";
+    emailBtn.textContent = contact.email;
+    emailBtn.title = `Open full history for ${contact.email}`;
+    emailBtn.addEventListener("click", () => opts.onOpenContact(contact.email));
+    head.append(emailBtn);
+    card.append(head);
+
+    const meta = doc.createElement("div");
+    meta.className = "omt-sidebar-meta";
+    const pct =
+      contact.attributableMessages > 0
+        ? ` (${Math.round((contact.openedMessages / contact.attributableMessages) * 100)}%)`
+        : "";
+    const parts = [
+      contact.attributableMessages > 0
+        ? `${contact.openedMessages} of ${contact.attributableMessages} opened${pct}`
+        : `${contact.messages} group ${contact.messages === 1 ? "email" : "emails"}`,
+    ];
+    if (contact.appleMppMessages > 0) parts.push(`${contact.appleMppMessages} Apple proxy`);
+    if (contact.lastOpenAt) parts.push(`last opened ${ago(contact.lastOpenAt, now)}`);
+    meta.textContent = parts.join(" · ");
+    card.append(meta);
+
+    const recent = messages.slice(0, 5);
+    if (recent.length > 0) {
+      const list = doc.createElement("ul");
+      list.className = "omt-sidebar-list";
+      for (const m of recent) {
+        const li = doc.createElement("li");
+        const row = doc.createElement("a");
+        row.className = "omt-sidebar-row";
+        row.href = m.gmail_thread_id ? `#all/${encodeURIComponent(m.gmail_thread_id)}` : "#";
+        row.addEventListener("click", (e) => {
+          if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+          e.preventDefault();
+          opts.onOpenThread(m);
+        });
+        const img = doc.createElement("img");
+        img.src = statusIconUrl(m.attribution === "individual" ? m.opens : 0, m.attribution === "individual" ? m.appleMpp : 0);
+        img.alt = m.opens > 0 ? "Opened" : "Not opened";
+        const subj = doc.createElement("span");
+        subj.className = "omt-sidebar-subj";
+        subj.textContent = m.subject || "(no subject)";
+        const st = doc.createElement("span");
+        st.className = "omt-sidebar-st";
+        st.textContent =
+          m.attribution === "group_unknown"
+            ? m.opens > 0
+              ? "group opened"
+              : "group"
+            : m.opens > 0
+              ? `${m.opens}x · ${ago(m.lastOpenAt!, now)}`
+              : m.appleMpp > 0
+                ? "Apple proxy"
+                : "unopened";
+        row.append(img, subj, st);
+        li.append(row);
+        list.append(li);
+      }
+      card.append(list);
+    }
+
+    root.append(card);
+  }
   return root;
 }

@@ -5,7 +5,7 @@ import { authorize } from "./gmail.js";
 import { attachmentPaths, readRows } from "./input.js";
 import { textToHtml } from "./mime.js";
 import { status } from "./status.js";
-import { connectAppPasswordAccount, connectOAuthAccount, sendViaOutbox } from "./tracker.js";
+import { connectAppPasswordAccount, connectOAuthAccount, listConnectedAccounts, sendViaOutbox } from "./tracker.js";
 
 const usage = `openmt <command>
 
@@ -15,9 +15,9 @@ const usage = `openmt <command>
   send   Send tracked mail from a CSV or XLSX via your server's unified SMTP pipeline
          (pixel-free Sent copy + per-recipient tracking even with --cc).
          Every file in ./files is attached to every email.
-         --input <file> [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
+         --input <file> [--from <email>] [--sender-name <name>] [--limit <n>] [--delay <seconds>] [--cc <email>] [--dry-run]
   status Tracked messages, most recently opened first
-         [--since 7d] [--opened | --unopened] [--sender you@gmail.com] [--json]
+         [--since 7d] [--opened | --unopened] [--sender | --from you@gmail.com] [--json]
 `;
 
 async function auth(argv: string[]) {
@@ -85,6 +85,8 @@ async function send(argv: string[]) {
     args: argv,
     options: {
       input: { type: "string", default: "contacts.csv" },
+      from: { type: "string" },
+      "sender-name": { type: "string" },
       limit: { type: "string", default: "9999" },
       delay: { type: "string", default: "30" },
       cc: { type: "string" },
@@ -97,9 +99,21 @@ async function send(argv: string[]) {
   const attachments = attachmentPaths();
   const dryRun = values["dry-run"];
   const delayMs = Number(values.delay) * 1000;
-  const from = `${config.senderName} <${config.senderEmail}>`;
 
-  console.log(`Sending ${batch.length} emails via open-mailtrack server (${dryRun ? "DRY RUN" : "LIVE"})`);
+  const senderEmail = (values.from ?? config.senderEmail).trim().toLowerCase();
+  let senderName = values["sender-name"] ?? config.senderName;
+  if (!dryRun) {
+    const connected = await listConnectedAccounts(config);
+    const match = connected.find((a) => a.email.toLowerCase() === senderEmail);
+    if (!match) {
+      const available = connected.map((a) => a.email).join(", ") || "(none)";
+      throw new Error(`Account ${senderEmail} is not connected on server. Connected accounts: ${available}`);
+    }
+    if (!values["sender-name"] && match.displayName) senderName = match.displayName;
+  }
+  const from = senderName ? `${senderName} <${senderEmail}>` : senderEmail;
+
+  console.log(`Sending ${batch.length} emails from ${from} via open-mailtrack server (${dryRun ? "DRY RUN" : "LIVE"})`);
   if (attachments.length) console.log(`Attaching ${attachments.join(", ")}`);
   console.log();
   let sent = 0;
@@ -120,7 +134,7 @@ async function send(argv: string[]) {
     }
     try {
       const result = await sendViaOutbox(config, {
-        sender: config.senderEmail,
+        sender: senderEmail,
         from,
         to: [to],
         cc: values.cc ? [values.cc] : [],

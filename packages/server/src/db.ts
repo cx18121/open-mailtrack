@@ -16,6 +16,9 @@ export type Message = {
   sent_at: number | null;
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
+  replied_at: number | null;
+  reply_checked_at: number | null;
+  followup_dismissed_at: number | null;
 };
 
 export type RecipientToken = {
@@ -81,7 +84,10 @@ create table if not exists messages (
   created_at integer not null,
   sent_at integer,
   gmail_message_id text,
-  gmail_thread_id text
+  gmail_thread_id text,
+  replied_at integer,
+  reply_checked_at integer,
+  followup_dismissed_at integer
 );
 create index if not exists messages_gmail_message_id on messages (gmail_message_id);
 create index if not exists messages_gmail_thread_id on messages (gmail_thread_id);
@@ -158,6 +164,9 @@ type OutboxRow = Omit<OutboxItem, "is_scheduled" | "recipients" | "payload_encry
 const rowToMessage = (r: MessageRow): Message => ({
   ...r,
   tracking_mode: r.tracking_mode ?? "legacy",
+  replied_at: r.replied_at ?? null,
+  reply_checked_at: r.reply_checked_at ?? null,
+  followup_dismissed_at: r.followup_dismissed_at ?? null,
   recipients: JSON.parse(r.recipients),
 });
 const rowToHit = (r: HitRow): Hit => ({
@@ -201,6 +210,15 @@ export function openDb(path: string) {
   // Idempotent migrations for existing databases.
   if (!hasColumn(db, "messages", "tracking_mode")) {
     db.exec(`alter table messages add column tracking_mode text not null default 'legacy'`);
+  }
+  if (!hasColumn(db, "messages", "replied_at")) {
+    db.exec(`alter table messages add column replied_at integer`);
+  }
+  if (!hasColumn(db, "messages", "reply_checked_at")) {
+    db.exec(`alter table messages add column reply_checked_at integer`);
+  }
+  if (!hasColumn(db, "messages", "followup_dismissed_at")) {
+    db.exec(`alter table messages add column followup_dismissed_at integer`);
   }
   if (!hasColumn(db, "hits", "recipient_token")) {
     db.exec(`alter table hits add column recipient_token text`);
@@ -247,6 +265,12 @@ export function openDb(path: string) {
   );
   const deleteMessage = db.prepare(`delete from messages where id = ?`);
   const deleteTokensForMessage = db.prepare(`delete from recipient_tokens where message_id = ?`);
+  const updateReplyCheckedStmt = db.prepare(
+    `update messages set replied_at = coalesce(replied_at, ?), reply_checked_at = ? where id = ?`,
+  );
+  const setFollowupDismissedStmt = db.prepare(
+    `update messages set followup_dismissed_at = ? where id = ?`,
+  );
   const selectMessage = db.prepare(`select * from messages where id = ?`);
   const selectMessages = db.prepare(`select * from messages order by created_at desc`);
 
@@ -395,6 +419,35 @@ export function openDb(path: string) {
     },
     listMessages() {
       return (selectMessages.all() as MessageRow[]).map(rowToMessage);
+    },
+    listMessagesNeedingReplyCheck(opts: { sender?: string; sinceMs: number; staleBeforeMs: number; limit?: number }) {
+      const clauses = [
+        "gmail_thread_id is not null",
+        "sent_at is not null",
+        "sent_at >= ?",
+        "replied_at is null",
+        "followup_dismissed_at is null",
+        "(reply_checked_at is null or reply_checked_at <= ?)",
+      ];
+      const params: (string | number)[] = [opts.sinceMs, opts.staleBeforeMs];
+      if (opts.sender) {
+        clauses.push("lower(sender) = ?");
+        params.push(opts.sender.toLowerCase());
+      }
+      params.push(opts.limit ?? 40);
+      const rows = db
+        .prepare(
+          `select * from messages where ${clauses.join(" and ")}
+           order by coalesce(reply_checked_at, 0) asc, sent_at desc limit ?`,
+        )
+        .all(...params) as MessageRow[];
+      return rows.map(rowToMessage);
+    },
+    markReplyChecked(id: string, repliedAt: number | null, checkedAt = Date.now()) {
+      updateReplyCheckedStmt.run(repliedAt, checkedAt, id);
+    },
+    setFollowupDismissed(id: string, dismissedAt: number | null) {
+      return setFollowupDismissedStmt.run(dismissedAt, id).changes > 0;
     },
     createRecipientTokens(tokens: Pick<RecipientToken, "token" | "message_id" | "recipient" | "kind">[]) {
       for (const t of tokens) {

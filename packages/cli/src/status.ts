@@ -72,10 +72,11 @@ export async function status(argv: string[]) {
       opened: { type: "boolean", default: false },
       unopened: { type: "boolean", default: false },
       sender: { type: "string" },
+      from: { type: "string" },
     },
   });
   const config = readConfig();
-  let messages = await fetchStatus(config, values.since ? parseDuration(values.since) : null, values.sender);
+  let messages = await fetchStatus(config, values.since ? parseDuration(values.since) : null, values.from ?? values.sender);
   if (values.opened) messages = messages.filter((m) => m.opens > 0);
   if (values.unopened) messages = messages.filter((m) => m.opens === 0);
   console.log(values.json ? JSON.stringify(messages, null, 2) : formatTable(messages));

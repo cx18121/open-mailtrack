@@ -578,4 +578,96 @@ describe("unified outbox, per-recipient tracking, Apple MPP, and contacts", () =
     expect(db.getOutbox(sched.outboxId)!.status).toBe("sent");
     expect(mock.smtpCopies.map((c) => c.to)).toEqual(["real@example.com", "scheduled@example.com"]);
   });
+
+  it("detects replies per thread, supports follow-up dismissal, and retries briefly for delayed draft attachments", async () => {
+    let draftReads = 0;
+    const draftWithFile = await compileMime({
+      from: "me@cornell.edu",
+      to: ["alice@example.com"],
+      subject: "Attachment test",
+      html: "<p>File</p>",
+      messageId: "<att-draft@cornell.edu>",
+      attachments: [
+        {
+          filename: "report.pdf",
+          contentType: "application/pdf",
+          contentBase64: Buffer.from("%PDF-1.4 ok").toString("base64"),
+        },
+      ],
+    });
+    const base = createMockTransport("me@cornell.edu");
+    const repliedThreads = new Map<string, number>();
+    const transport: MailboxTransport = {
+      ...base.transport,
+      async getDraftRaw() {
+        draftReads++;
+        // First read returns null (Gmail still saving), second read returns the draft with attachment.
+        return draftReads < 2 ? null : { raw: draftWithFile };
+      },
+      async getThreadReplyAt(threadId, sentAt) {
+        const ts = repliedThreads.get(threadId);
+        return ts && ts > sentAt ? ts : null;
+      },
+    };
+    const db = openDb(":memory:");
+    const app = createApp(db, { apiKey: "secret", publicUrl: "https://t.example.com", transportFactory: () => transport });
+    await app.request("/api/accounts/app-password", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ email: "me@cornell.edu", appPassword: "secret" }),
+    });
+
+    const sent = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@cornell.edu",
+          to: ["alice@example.com"],
+          subject: "Attachment test",
+          html: "<p>File</p>",
+          draftId: "d1",
+          hasAttachments: true,
+          sync: true,
+        }),
+      })
+    ).json();
+    expect(sent.status).toBe("sent");
+    expect(draftReads).toBe(2);
+    const parsedSent = await parseDraftMime(base.smtpCopies[0].raw);
+    expect(parsedSent.attachments.map((a) => a.filename)).toEqual(["report.pdf"]);
+
+    // Before reply, reply check finds 0 replies
+    const check1 = await (
+      await app.request("/api/followups/refresh", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ sender: "me@cornell.edu", force: true }),
+      })
+    ).json();
+    expect(check1).toEqual({ checked: 1, replied: 0 });
+    expect(db.getMessage(sent.messageId)!.replied_at).toBeNull();
+
+    // Simulate external reply arriving in the thread
+    const replyTs = Date.now() + 5000;
+    repliedThreads.set(sent.gmailThreadId, replyTs);
+    const check2 = await (
+      await app.request("/api/followups/refresh", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({ sender: "me@cornell.edu", force: true }),
+      })
+    ).json();
+    expect(check2).toEqual({ checked: 1, replied: 1 });
+    expect(db.getMessage(sent.messageId)!.replied_at).toBe(replyTs);
+
+    // Dismiss follow-up works and persists
+    const dismissRes = await app.request(`/api/messages/${sent.messageId}/dismiss-followup`, {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ dismissed: true }),
+    });
+    expect(dismissRes.status).toBe(204);
+    expect(db.getMessage(sent.messageId)!.followup_dismissed_at).not.toBeNull();
+  });
 });

@@ -87,3 +87,11 @@ export async function connectAppPasswordAccount(
   });
   return res.json();
 }
+
+export async function listConnectedAccounts(
+  config: Config,
+): Promise<{ email: string; authType: string; displayName: string | null }[]> {
+  const res = await api(config, "/accounts", { method: "GET" });
+  const data = (await res.json()) as { accounts: { email: string; authType: string; displayName: string | null }[] };
+  return data.accounts;
+}

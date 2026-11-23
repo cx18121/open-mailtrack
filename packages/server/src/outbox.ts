@@ -292,16 +292,25 @@ export function createOutboxService(opts: OutboxServiceOptions) {
 
       if (req.draftId || req.draftMessageId) {
         try {
-          const draft = await transport.getDraftRaw(req.draftId, req.draftMessageId);
-          if (draft) {
-            const parsed = await parseDraftMime(draft.raw);
+          const attempts = req.hasAttachments && attachments.length === 0 ? [0, 600, 1200, 1800] : [0];
+          let draft: { raw: Buffer; threadId?: string } | null = null;
+          let parsed: Awaited<ReturnType<typeof parseDraftMime>> | null = null;
+          for (const waitMs of attempts) {
+            if (waitMs > 0) await new Promise((r) => setTimeout(r, waitMs));
+            draft = await transport.getDraftRaw(req.draftId, req.draftMessageId);
+            if (!draft) continue;
+            parsed = await parseDraftMime(draft.raw);
+            if (!req.hasAttachments || parsed.attachments.length > 0) break;
+          }
+          if (draft && parsed) {
             if (attachments.length === 0 && parsed.attachments.length > 0) {
               attachments = parsed.attachments;
             }
             inReplyTo ??= parsed.inReplyTo;
             references ??= parsed.references;
             if (parsed.inReplyTo) threadId ??= draft.threadId ?? null;
-          } else if (req.hasAttachments && attachments.length === 0) {
+          }
+          if (req.hasAttachments && attachments.length === 0) {
             throw new OutboxError(
               502,
               "Could not read draft attachments from Gmail yet; wait a second for Gmail to finish saving the draft and retry.",

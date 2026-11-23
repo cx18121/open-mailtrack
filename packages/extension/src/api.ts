@@ -38,6 +38,8 @@ export type TrackedMessage = OpenSummary & {
   gmail_thread_id: string | null;
   sent_at: number | null;
   created_at: number;
+  replied_at?: number | null;
+  followup_dismissed_at?: number | null;
 };
 
 export type ThreadSummary = {
@@ -204,6 +206,12 @@ export function createApi(settings: Pick<Settings, "serverUrl" | "apiKey">) {
       const params = new URLSearchParams({ sender });
       return (await call(`/contacts/${encodeURIComponent(email)}?${params}`, "GET")).json();
     },
+
+    // Follow-up & reply checks
+    dismissFollowup: (id: string, dismissed = true) =>
+      call(`/messages/${encodeURIComponent(id)}/dismiss-followup`, "POST", { dismissed }),
+    refreshFollowups: async (sender: string): Promise<{ checked: number; replied: number }> =>
+      (await call("/followups/refresh", "POST", { sender, force: true })).json(),
   };
 }
 

@@ -15,7 +15,8 @@ Connected Gmail and Google Workspace accounts send tracked mail through your sel
 - **Fail closed and unconnected accounts.** If your server or SMTP fails, the compose window and draft stay open with an error banner. Gmail accounts not yet connected to the server send natively and untracked with a prompt to connect.
 - **Apple Mail Privacy Protection (MPP).** The server downloads and caches Apple's published iCloud Private Relay egress IP CSV (`https://mask-api.icloud.com/egress-ip-ranges.csv`). Hits from Apple relay IPs with bare `Mozilla/5.0` are classified as `apple_mpp` and shown with a distinct muted blue-grey icon ("Apple Mail privacy proxy · may have been opened") without turning checkmarks green or inflating confirmed open counts.
 - **Gmail prefetch filtering.** Gmail's known prefetch bot is excluded. Google image-proxy fetches within 30 seconds of a recorded send are also excluded.
-- **Per-contact history.** Browse all contacts in `Tracked → Contacts` or click any recipient in a thread's status line to view every tracked message sent to them, individual open timestamps, and open rate. Legacy multi-recipient messages sent before this upgrade appear as "Opened (group, recipient unknown)" without skewing individual open rates.
+- **Per-contact history and inline thread sidebar.** Browse all contacts in `Tracked → Contacts`, click any recipient in a thread's status line, or open the **Open history** panel in Gmail's right sidebar while reading a thread. Legacy multi-recipient messages sent before this upgrade appear as "Opened (group, recipient unknown)" without skewing individual open rates.
+- **Follow-up and no-reply radar.** The server periodically checks Gmail threads for replies from other participants. In `Tracked → Messages`, the **Needs follow-up** filter surfaces emails sent 1 to 30 days ago with no reply yet (opened leads first), with **Check replies** and **Dismiss** controls.
 
 ## server
 
@@ -55,8 +56,8 @@ openmt auth --server https://t.example.com --api-key <API_KEY> \
   --sender-name "Your Name" --sender-email you@gmail.com \
   [--app-password "<16-char-app-password>"] [--client-id <id> --client-secret <secret>]
 
-openmt send --input contacts.csv [--limit 20] [--delay 30] [--cc someone@example.com] [--dry-run]
-openmt status [--since 7d] [--opened | --unopened] [--sender you@gmail.com] [--json]
+openmt send --input contacts.csv [--from you@cornell.edu] [--limit 20] [--delay 30] [--cc someone@example.com] [--dry-run]
+openmt status [--since 7d] [--opened | --unopened] [--from you@gmail.com] [--json]
 ```
 
 Columns: `contact_email`, `subject`, `body`. Attachments in a `files/` folder next to where you run the command are attached to every email.

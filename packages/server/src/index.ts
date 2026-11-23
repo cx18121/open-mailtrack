@@ -25,6 +25,7 @@ const app = createApp(db, {
   appleRelay,
 });
 app.outbox.start();
+app.replyChecker.start();
 
 const server = serve({ fetch: app.fetch, port }, () => {
   console.log(`open-mailtrack server on :${port}, pixel base ${publicUrl}/p/`);
@@ -33,6 +34,7 @@ const server = serve({ fetch: app.fetch, port }, () => {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => {
     appleRelay.stop();
+    app.replyChecker.stop();
     void app.outbox.stopAndDrain().finally(() => {
       server.close(() => {
         db.close();

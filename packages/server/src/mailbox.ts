@@ -31,6 +31,8 @@ export interface MailboxTransport {
   readonly email: string;
   verify(): Promise<void>;
   getThreadReplyHeaders(threadId: string): Promise<ThreadReplyHeaders | null>;
+  /** Returns the earliest reply timestamp from someone other than `senderEmail` in `threadId` after `sentAt`, or null. */
+  getThreadReplyAt?(threadId: string, sentAt: number, senderEmail: string): Promise<number | null>;
   getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null>;
   deleteDraft(draftId?: string | null, draftMessageId?: string | null): Promise<void>;
   createDraft(raw: Buffer, threadId?: string | null): Promise<{ draftId: string; messageId: string }>;
@@ -182,6 +184,33 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       const existingRefs = h("references");
       const references = [existingRefs, msgId].filter(Boolean).join(" ").trim() || undefined;
       return { inReplyTo: msgId, references, subject: h("subject") };
+    },
+
+    async getThreadReplyAt(threadId: string, sentAt: number, senderEmail: string): Promise<number | null> {
+      const res = await gmailFetch(
+        `/threads/${encodeURIComponent(threadId)}?format=metadata&metadataHeaders=From`,
+      );
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error(`Gmail thread reply check failed: HTTP ${res.status}`);
+      const data = (await res.json()) as {
+        messages?: {
+          internalDate?: string;
+          labelIds?: string[];
+          payload?: { headers?: { name: string; value: string }[] };
+        }[];
+      };
+      const me = senderEmail.toLowerCase();
+      let earliest: number | null = null;
+      for (const m of data.messages ?? []) {
+        if (m.labelIds?.includes("DRAFT") || m.labelIds?.includes("TRASH")) continue;
+        const ts = Number(m.internalDate ?? 0);
+        if (!ts || ts <= sentAt) continue;
+        const fromHeader = m.payload?.headers?.find((x) => x.name.toLowerCase() === "from")?.value ?? "";
+        const fromEmail = extractEmailAddress(fromHeader);
+        if (!fromEmail || fromEmail === me) continue;
+        if (earliest === null || ts < earliest) earliest = ts;
+      }
+      return earliest;
     },
 
     async getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null> {
@@ -410,6 +439,34 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
           const existingRefs = getHeader("references");
           const references = [existingRefs, msgId].filter(Boolean).join(" ").trim() || undefined;
           return { inReplyTo: msgId, references, subject: msg.envelope?.subject ?? getHeader("subject") };
+        } finally {
+          lock.release();
+        }
+      });
+    },
+
+    async getThreadReplyAt(threadId: string, sentAt: number, senderEmail: string): Promise<number | null> {
+      const dec = hexToDec(threadId);
+      if (!dec) return null;
+      const me = senderEmail.toLowerCase();
+      return withImap(async (client) => {
+        const list = await client.list();
+        const allMail = list.find((b) => b.specialUse === "\\All")?.path ?? "[Gmail]/All Mail";
+        const lock = await client.getMailboxLock(allMail);
+        try {
+          const uids = await client.search({ threadId: dec }, { uid: true });
+          if (!uids || uids.length === 0) return null;
+          let earliest: number | null = null;
+          for (const uid of uids) {
+            const msg = await client.fetchOne(String(uid), { envelope: true, internalDate: true, flags: true }, { uid: true });
+            if (!msg || msg.flags?.has("\\Draft")) continue;
+            const ts = msg.internalDate ? new Date(msg.internalDate).getTime() : 0;
+            if (!ts || ts <= sentAt) continue;
+            const fromAddr = msg.envelope?.from?.[0]?.address?.toLowerCase() ?? "";
+            if (!fromAddr || fromAddr === me) continue;
+            if (earliest === null || ts < earliest) earliest = ts;
+          }
+          return earliest;
         } finally {
           lock.release();
         }

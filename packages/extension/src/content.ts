@@ -16,12 +16,14 @@ import { loadSettings } from "./settings.js";
 import { when } from "./time.js";
 import {
   contactDetailView,
+  contactSidebarCard,
   contactsList,
   scheduledList,
   sectionBar,
   trackedList,
   type Filter,
   type Section,
+  type ThreadContactRecord,
 } from "./tracked.js";
 import { hasPixel } from "./tracking.js";
 
@@ -144,6 +146,10 @@ async function main() {
     let enabled = !isConfirmedDisconnected();
     let sending = false;
     let clientRequestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const draftSavedWaiters: (() => void)[] = [];
+    compose.on("draftSaved", () => {
+      while (draftSavedWaiters.length > 0) draftSavedWaiters.shift()?.();
+    });
 
     if (isConfirmedDisconnected()) {
       try {
@@ -225,12 +231,22 @@ async function main() {
         );
         const draftMessageId = compose.getInitialMessageID?.() || null;
         let draftId = (await compose.getCurrentDraftID?.().catch(() => null)) || null;
-        if (!draftId && hasAttachments && compose.getDraftID) {
-          draftId =
-            (await Promise.race([
-              compose.getDraftID().catch(() => null),
-              new Promise<null>((r) => setTimeout(() => r(null), 4000)),
-            ])) || null;
+        if (hasAttachments && !draftId) {
+          // Wait briefly for Gmail to finish saving the newly attached file into the draft.
+          const waitForDraftSaved = new Promise<void>((resolve) => {
+            draftSavedWaiters.push(resolve);
+            setTimeout(resolve, 4000);
+          });
+          if (compose.getDraftID) {
+            draftId =
+              (await Promise.race([
+                compose.getDraftID().catch(() => null),
+                waitForDraftSaved.then(() => compose.getCurrentDraftID?.().catch(() => null) ?? null),
+              ])) || null;
+          } else {
+            await waitForDraftSaved;
+            draftId = (await compose.getCurrentDraftID?.().catch(() => null)) || null;
+          }
         }
 
         const res = await api.enqueueOutbox({
@@ -452,6 +468,60 @@ async function main() {
       });
   });
 
+  sdk.Conversations.registerThreadViewHandler?.(async (threadView) => {
+    let destroyed = false;
+    threadView.on("destroy", () => {
+      destroyed = true;
+    });
+    try {
+      const participants = new Set<string>();
+      for (const mv of threadView.getMessageViewsAll?.() ?? []) {
+        try {
+          const sender = mv.getSender?.()?.emailAddress?.trim().toLowerCase();
+          if (sender && sender !== me) participants.add(sender);
+          const recs = await mv.getRecipientsFull?.().catch(() => []);
+          for (const r of recs ?? []) {
+            const addr = r.emailAddress?.trim().toLowerCase();
+            if (addr && addr !== me) participants.add(addr);
+          }
+        } catch {
+          // Skip unloaded messages safely.
+        }
+      }
+      const emails = [...participants].slice(0, 8);
+      if (emails.length === 0 || destroyed) return;
+
+      const settled = await Promise.all(
+        emails.map((email) => api.getContact(email, me).catch(() => null)),
+      );
+      if (destroyed) return;
+      const records = settled.filter((r): r is ThreadContactRecord => r !== null);
+      if (records.length === 0) return;
+
+      const el = contactSidebarCard(
+        document,
+        records,
+        {
+          onOpenContact: (email) => openTracked({ section: "contacts", contactEmail: email }),
+          onOpenThread: (entry) => {
+            if (entry.gmail_thread_id) {
+              sdk.Router.goto(sdk.Router.NativeRouteIDs.THREAD, { threadID: entry.gmail_thread_id }).catch((err) =>
+                log("could not open thread", err),
+              );
+            }
+          },
+        },
+      );
+      threadView.addSidebarContentPanel({
+        title: "Open history",
+        iconUrl: chrome.runtime.getURL("icons/opened.svg"),
+        el,
+      });
+    } catch (err) {
+      log("thread contact sidebar failed", err);
+    }
+  });
+
   sdk.Lists.registerThreadRowViewHandler((row) => {
     if (row.destroyed) return;
     const threadId = Kefir.fromPromise<string, unknown>(row.getThreadIDAsync());
@@ -546,6 +616,30 @@ async function main() {
             onContactClick: (email) => {
               section = "contacts";
               void loadContactDetail(email);
+            },
+            onDismissFollowup: async (id) => {
+              try {
+                await api.dismissFollowup(id, true);
+                showButter({ text: "Dismissed from Needs follow-up." });
+                await render();
+              } catch (err) {
+                showButter({ text: (err as Error).message });
+              }
+            },
+            onCheckReplies: async () => {
+              try {
+                showButter({ text: "Checking Gmail threads for replies…" });
+                const res = await api.refreshFollowups(me);
+                showButter({
+                  text:
+                    res.replied > 0
+                      ? `Found ${res.replied} new ${res.replied === 1 ? "reply" : "replies"} across ${res.checked} checked threads.`
+                      : `Checked ${res.checked} threads. No new replies yet.`,
+                });
+                await render();
+              } catch (err) {
+                showButter({ text: (err as Error).message });
+              }
             },
           }),
         );

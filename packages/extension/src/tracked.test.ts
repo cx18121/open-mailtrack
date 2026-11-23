@@ -1,6 +1,15 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import type { TrackedMessage } from "./api.js";
-import { contactDetailView, contactsList, rowText, scheduledList, trackedList, type ListState } from "./tracked.js";
+import {
+  contactDetailView,
+  contactSidebarCard,
+  contactsList,
+  needsFollowup,
+  rowText,
+  scheduledList,
+  trackedList,
+  type ListState,
+} from "./tracked.js";
 
 const now = new Date("2026-09-15T20:00:00").getTime();
 const h = (n: number) => now - n * 3_600_000;
@@ -41,7 +50,7 @@ describe("trackedList", () => {
     const el = trackedList(document, [msg({ opens: 1, lastOpenAt: h(1), late: { kind: "after_send", days: 3 } }), msg({ id: "y", gmail_thread_id: null })], state({ onOpen }), now);
     const rows = el.querySelectorAll(".omt-tracked-row");
     expect(rows).toHaveLength(2);
-    expect([...el.querySelectorAll(".omt-chip")].map((c) => c.textContent)).toEqual(["All2", "Opened1", "Not opened1"]);
+    expect([...el.querySelectorAll(".omt-chip")].map((c) => c.textContent)).toEqual(["All2", "Opened1", "Not opened1", "Needs follow-up0"]);
     expect(rows[0].tagName).toBe("A");
     expect(rows[0].querySelector(".omt-status-late")!.textContent).toBe("3 days after sending");
     expect(rows[0].querySelector(".omt-tracked-to")!.textContent).toBe("ana");
@@ -163,5 +172,81 @@ describe("trackedList", () => {
       now,
     );
     expect(detailEl.textContent).toContain("Opened (group, recipient unknown)");
+  });
+
+  it("filters Needs follow-up (>=24h, no reply, not dismissed), prioritizes opened leads, and renders thread contact sidebar", () => {
+    const oldOpened = msg({ id: "a", sent_at: h(48), opens: 2, lastOpenAt: h(6), subject: "Opened no reply" });
+    const oldUnopened = msg({ id: "b", sent_at: h(72), opens: 0, subject: "Unopened no reply" });
+    const oldReplied = msg({ id: "c", sent_at: h(48), opens: 1, lastOpenAt: h(10), replied_at: h(5), subject: "Already replied" });
+    const oldDismissed = msg({ id: "d", sent_at: h(48), followup_dismissed_at: h(2), subject: "Dismissed" });
+    const tooRecent = msg({ id: "e", sent_at: h(3), subject: "Just sent" });
+
+    expect(needsFollowup(oldOpened, now)).toBe(true);
+    expect(needsFollowup(oldUnopened, now)).toBe(true);
+    expect(needsFollowup(oldReplied, now)).toBe(false);
+    expect(needsFollowup(oldDismissed, now)).toBe(false);
+    expect(needsFollowup(tooRecent, now)).toBe(false);
+
+    const onDismissFollowup = vi.fn();
+    const onCheckReplies = vi.fn();
+    const el = trackedList(
+      document,
+      [oldUnopened, oldOpened, oldReplied, oldDismissed, tooRecent],
+      state({ filter: "followup", onDismissFollowup, onCheckReplies }),
+      now,
+    );
+    const subjects = [...el.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent);
+    expect(subjects).toEqual(["Opened no reply", "Unopened no reply"]);
+    el.querySelector<HTMLButtonElement>(".omt-followup-refresh")!.click();
+    expect(onCheckReplies).toHaveBeenCalledOnce();
+    el.querySelector<HTMLButtonElement>(".omt-dismiss-btn")!.click();
+    expect(onDismissFollowup).toHaveBeenCalledWith("a");
+
+    // Inline thread contact sidebar card
+    const onOpenContact = vi.fn();
+    const onOpenThread = vi.fn();
+    const card = contactSidebarCard(
+      document,
+      [
+        {
+          contact: {
+            email: "alice@example.com",
+            messages: 3,
+            attributableMessages: 3,
+            openedMessages: 2,
+            appleMppMessages: 0,
+            totalOpens: 4,
+            lastOpenAt: h(1),
+            lastSentAt: h(2),
+          },
+          messages: [
+            {
+              id: "m1",
+              subject: "Proposal",
+              recipients: ["alice@example.com"],
+              gmail_thread_id: "t1",
+              sent_at: h(2),
+              created_at: h(2),
+              attribution: "individual",
+              opens: 2,
+              firstOpenAt: h(2),
+              lastOpenAt: h(1),
+              openAts: [h(2), h(1)],
+              late: null,
+              appleMpp: 0,
+              lastAppleMppAt: null,
+              appleMppAts: [],
+            },
+          ],
+        },
+      ],
+      { onOpenContact, onOpenThread },
+      now,
+    );
+    expect(card.textContent).toContain("2 of 3 opened (67%)");
+    card.querySelector<HTMLButtonElement>(".omt-sidebar-email")!.click();
+    expect(onOpenContact).toHaveBeenCalledWith("alice@example.com");
+    card.querySelector<HTMLAnchorElement>(".omt-sidebar-row")!.click();
+    expect(onOpenThread).toHaveBeenCalledOnce();
   });
 });
