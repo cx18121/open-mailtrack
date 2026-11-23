@@ -24,9 +24,19 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
 }
 
 export type Section = "messages" | "scheduled" | "contacts";
-export type Filter = "all" | "opened" | "unopened" | "followup";
+export type Filter = "all" | "opened" | "unopened" | "hot" | "followup" | "replied" | "apple_mpp";
+export type TimeRange = "all" | "24h" | "7d" | "30d";
+export type TypeFilter = "all" | "direct" | "group" | "unreplied";
+export type SortBy = "default" | "last_opened" | "most_opens" | "newest" | "oldest";
+export type ContactSort = "last_opened" | "most_opened" | "open_rate" | "most_emailed";
+
 const FOLLOWUP_MIN_AGE_MS = 24 * 3_600_000;
 const FOLLOWUP_MAX_AGE_MS = 30 * 86_400_000;
+const TIME_RANGE_MS: Record<Exclude<TimeRange, "all">, number> = {
+  "24h": 24 * 3_600_000,
+  "7d": 7 * 86_400_000,
+  "30d": 30 * 86_400_000,
+};
 
 export function needsFollowup(m: TrackedMessage, now = Date.now()): boolean {
   if (m.replied_at || m.followup_dismissed_at) return false;
@@ -34,20 +44,59 @@ export function needsFollowup(m: TrackedMessage, now = Date.now()): boolean {
   return age >= FOLLOWUP_MIN_AGE_MS && age <= FOLLOWUP_MAX_AGE_MS;
 }
 
-const FILTERS: { key: Filter; label: string }[] = [
+export function isHotMessage(m: TrackedMessage): boolean {
+  return m.opens >= 3 || m.late !== null;
+}
+
+export function isAppleProxyOnly(m: TrackedMessage): boolean {
+  return m.opens === 0 && (m.appleMpp ?? 0) > 0;
+}
+
+function matchesChip(m: TrackedMessage, key: Filter, now: number): boolean {
+  switch (key) {
+    case "all":
+      return true;
+    case "opened":
+      return m.opens > 0;
+    case "unopened":
+      return m.opens === 0;
+    case "hot":
+      return isHotMessage(m);
+    case "followup":
+      return needsFollowup(m, now);
+    case "replied":
+      return Boolean(m.replied_at);
+    case "apple_mpp":
+      return isAppleProxyOnly(m);
+  }
+}
+
+const FILTERS: { key: Filter; label: string; hideWhenZero?: boolean }[] = [
   { key: "all", label: "All" },
   { key: "opened", label: "Opened" },
   { key: "unopened", label: "Not opened" },
+  { key: "hot", label: "Hot / Reopened" },
   { key: "followup", label: "Needs follow-up" },
+  { key: "replied", label: "Replied" },
+  { key: "apple_mpp", label: "Apple proxy", hideWhenZero: true },
 ];
 
 export type ListState = {
   filter: Filter;
   /** IDs of messages whose open times or recipients are showing. Kept by the caller so refreshes keep them open. */
   expanded: ReadonlySet<string>;
+  query?: string;
+  timeRange?: TimeRange;
+  typeFilter?: TypeFilter;
+  sortBy?: SortBy;
   onFilter: (next: Filter) => void;
   onOpen: (message: TrackedMessage) => void;
   onToggle: (id: string) => void;
+  onQuery?: (next: string) => void;
+  onTimeRange?: (next: TimeRange) => void;
+  onTypeFilter?: (next: TypeFilter) => void;
+  onSortBy?: (next: SortBy) => void;
+  onReset?: () => void;
   onContactClick?: (email: string) => void;
   onDismissFollowup?: (id: string) => void;
   onCheckReplies?: () => void;
@@ -85,26 +134,58 @@ export function sectionBar(
   return nav;
 }
 
-/** The Tracked Messages list in Gmail's visual language, sorted by the server (last open first). */
+/** The Tracked Messages list in Gmail's visual language, with status chips, search, time/type filters, and sort. */
 export function trackedList(
   doc: Document,
   all: TrackedMessage[],
-  { filter, expanded, onFilter, onOpen, onToggle, onContactClick, onDismissFollowup, onCheckReplies }: ListState,
+  {
+    filter,
+    expanded,
+    query = "",
+    timeRange = "all",
+    typeFilter = "all",
+    sortBy = "default",
+    onFilter,
+    onOpen,
+    onToggle,
+    onQuery,
+    onTimeRange,
+    onTypeFilter,
+    onSortBy,
+    onReset,
+    onContactClick,
+    onDismissFollowup,
+    onCheckReplies,
+  }: ListState,
   now = Date.now(),
 ): HTMLElement {
   const root = doc.createElement("div");
   root.className = "omt-tracked";
 
+  const trimmedQuery = query.trim().toLowerCase();
+  const base = all.filter((m) => {
+    if (trimmedQuery) {
+      const hay = `${m.subject} ${m.recipients.join(" ")}`.toLowerCase();
+      if (!hay.includes(trimmedQuery)) return false;
+    }
+    if (timeRange !== "all") {
+      const cutoff = now - TIME_RANGE_MS[timeRange];
+      const sentAt = m.sent_at ?? m.created_at;
+      const latestActivity = Math.max(sentAt, m.lastOpenAt ?? 0);
+      if (latestActivity < cutoff) return false;
+    }
+    if (typeFilter === "direct" && m.recipients.length !== 1) return false;
+    if (typeFilter === "group" && m.recipients.length < 2) return false;
+    if (typeFilter === "unreplied" && m.replied_at) return false;
+    return true;
+  });
+
   const bar = doc.createElement("div");
   bar.className = "omt-chips";
   bar.setAttribute("role", "tablist");
   for (const f of FILTERS) {
-    const count =
-      f.key === "all"
-        ? all.length
-        : f.key === "followup"
-          ? all.filter((m) => needsFollowup(m, now)).length
-          : all.filter((m) => (f.key === "opened") === m.opens > 0).length;
+    const count = base.filter((m) => matchesChip(m, f.key, now)).length;
+    if (f.hideWhenZero && count === 0 && filter !== f.key) continue;
     const chip = doc.createElement("button");
     chip.type = "button";
     chip.className = `omt-chip${f.key === filter ? " omt-chip-active" : ""}`;
@@ -129,14 +210,120 @@ export function trackedList(
   }
   root.append(bar);
 
-  const messages =
-    filter === "all"
-      ? [...all]
-      : filter === "followup"
-        ? all.filter((m) => needsFollowup(m, now))
-        : all.filter((m) => (filter === "opened") === m.opens > 0);
-  if (filter === "unopened") {
-    messages.sort((a, b) => (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at));
+  if (onQuery || onTimeRange || onTypeFilter || onSortBy) {
+    const toolbar = doc.createElement("div");
+    toolbar.className = "omt-toolbar";
+
+    if (onQuery) {
+      const search = doc.createElement("input");
+      search.type = "search";
+      search.className = "omt-search";
+      search.placeholder = "Filter by recipient or subject…";
+      search.value = query;
+      search.dataset.omtFocus = "messages:search";
+      search.addEventListener("input", () => onQuery(search.value));
+      toolbar.append(search);
+    }
+
+    const makeSelect = <T extends string>(
+      focusKey: string,
+      value: T,
+      ariaLabel: string,
+      options: [T, string][],
+      onChange: (next: T) => void,
+    ) => {
+      const sel = doc.createElement("select");
+      sel.className = "omt-select";
+      sel.setAttribute("aria-label", ariaLabel);
+      sel.dataset.omtFocus = focusKey;
+      for (const [val, label] of options) {
+        const opt = doc.createElement("option");
+        opt.value = val;
+        opt.textContent = label;
+        opt.selected = val === value;
+        sel.append(opt);
+      }
+      sel.addEventListener("change", () => onChange(sel.value as T));
+      return sel;
+    };
+
+    if (onTimeRange) {
+      toolbar.append(
+        makeSelect<TimeRange>(
+          "messages:time",
+          timeRange,
+          "Time range",
+          [
+            ["all", "All time"],
+            ["24h", "Last 24 hours"],
+            ["7d", "Last 7 days"],
+            ["30d", "Last 30 days"],
+          ],
+          onTimeRange,
+        ),
+      );
+    }
+
+    if (onTypeFilter) {
+      toolbar.append(
+        makeSelect<TypeFilter>(
+          "messages:type",
+          typeFilter,
+          "Email type",
+          [
+            ["all", "All emails"],
+            ["direct", "1-to-1 only"],
+            ["group", "Group only"],
+            ["unreplied", "No reply yet"],
+          ],
+          onTypeFilter,
+        ),
+      );
+    }
+
+    if (onSortBy) {
+      toolbar.append(
+        makeSelect<SortBy>(
+          "messages:sort",
+          sortBy,
+          "Sort messages",
+          [
+            ["default", "Sort: Default"],
+            ["last_opened", "Sort: Last opened"],
+            ["most_opens", "Sort: Most opens"],
+            ["newest", "Sort: Newest sent"],
+            ["oldest", "Sort: Oldest sent"],
+          ],
+          onSortBy,
+        ),
+      );
+    }
+
+    const hasActiveControls = Boolean(trimmedQuery) || timeRange !== "all" || typeFilter !== "all" || sortBy !== "default" || filter !== "all";
+    if (hasActiveControls && onReset) {
+      const clear = doc.createElement("button");
+      clear.type = "button";
+      clear.className = "omt-btn";
+      clear.textContent = "Clear";
+      clear.addEventListener("click", () => onReset());
+      toolbar.append(clear);
+    }
+
+    root.append(toolbar);
+  }
+
+  const messages = base.filter((m) => matchesChip(m, filter, now));
+  const sentTime = (m: TrackedMessage) => m.sent_at ?? m.created_at;
+  if (sortBy === "last_opened") {
+    messages.sort((a, b) => (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0) || sentTime(b) - sentTime(a));
+  } else if (sortBy === "most_opens") {
+    messages.sort((a, b) => b.opens - a.opens || (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0));
+  } else if (sortBy === "newest") {
+    messages.sort((a, b) => sentTime(b) - sentTime(a));
+  } else if (sortBy === "oldest") {
+    messages.sort((a, b) => sentTime(a) - sentTime(b));
+  } else if (filter === "unopened") {
+    messages.sort((a, b) => sentTime(a) - sentTime(b));
   } else if (filter === "followup") {
     // Show opened-without-reply leads first (most recently opened), then unopened oldest first.
     messages.sort((a, b) => {
@@ -144,8 +331,10 @@ export function trackedList(
       const bOpened = b.opens > 0 ? 1 : 0;
       if (aOpened !== bOpened) return bOpened - aOpened;
       if (aOpened) return (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0);
-      return (a.sent_at ?? a.created_at) - (b.sent_at ?? b.created_at);
+      return sentTime(a) - sentTime(b);
     });
+  } else if (filter === "hot") {
+    messages.sort((a, b) => b.opens - a.opens || (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0));
   }
 
   if (messages.length === 0) {
@@ -154,9 +343,9 @@ export function trackedList(
     empty.textContent =
       all.length === 0
         ? "No tracked messages yet. Send one from Gmail or with openmt."
-        : filter === "followup"
+        : filter === "followup" && !trimmedQuery
           ? "No emails waiting for a reply right now."
-          : "Nothing here right now.";
+          : "Nothing matches these filters.";
     root.append(empty);
     return root;
   }
@@ -356,7 +545,9 @@ export function scheduledList(doc: Document, items: OutboxItem[], actions: Sched
 
 export type ContactsListState = {
   query: string;
+  sortBy?: ContactSort;
   onQuery: (next: string) => void;
+  onSortBy?: (next: ContactSort) => void;
   onSelect: (email: string) => void;
 };
 
@@ -365,7 +556,7 @@ export function contactsList(doc: Document, contacts: ContactSummary[], state: C
   root.className = "omt-tracked";
 
   const searchBar = doc.createElement("div");
-  searchBar.className = "omt-chips";
+  searchBar.className = "omt-toolbar";
   const input = doc.createElement("input");
   input.type = "search";
   input.className = "omt-search";
@@ -374,9 +565,43 @@ export function contactsList(doc: Document, contacts: ContactSummary[], state: C
   input.dataset.omtFocus = "contacts:search";
   input.addEventListener("input", () => state.onQuery(input.value));
   searchBar.append(input);
+
+  if (state.onSortBy) {
+    const sortBy = state.sortBy ?? "last_opened";
+    const sel = doc.createElement("select");
+    sel.className = "omt-select";
+    sel.setAttribute("aria-label", "Sort contacts");
+    sel.dataset.omtFocus = "contacts:sort";
+    const opts: [ContactSort, string][] = [
+      ["last_opened", "Sort: Last opened"],
+      ["most_opened", "Sort: Most opens"],
+      ["open_rate", "Sort: Open rate"],
+      ["most_emailed", "Sort: Most emailed"],
+    ];
+    for (const [val, label] of opts) {
+      const opt = doc.createElement("option");
+      opt.value = val;
+      opt.textContent = label;
+      opt.selected = val === sortBy;
+      sel.append(opt);
+    }
+    sel.addEventListener("change", () => state.onSortBy!(sel.value as ContactSort));
+    searchBar.append(sel);
+  }
   root.append(searchBar);
 
-  if (contacts.length === 0) {
+  const sorted = [...contacts];
+  const sortBy = state.sortBy ?? "last_opened";
+  if (sortBy === "most_opened") {
+    sorted.sort((a, b) => b.totalOpens - a.totalOpens || (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0));
+  } else if (sortBy === "open_rate") {
+    const rate = (c: ContactSummary) => (c.attributableMessages > 0 ? c.openedMessages / c.attributableMessages : -1);
+    sorted.sort((a, b) => rate(b) - rate(a) || b.openedMessages - a.openedMessages);
+  } else if (sortBy === "most_emailed") {
+    sorted.sort((a, b) => b.messages - a.messages || (b.lastSentAt ?? 0) - (a.lastSentAt ?? 0));
+  }
+
+  if (sorted.length === 0) {
     const empty = doc.createElement("p");
     empty.className = "omt-tracked-empty";
     empty.textContent = state.query ? "No contacts match that filter." : "No contacts yet.";
@@ -386,7 +611,7 @@ export function contactsList(doc: Document, contacts: ContactSummary[], state: C
 
   const list = doc.createElement("div");
   list.className = "omt-tracked-list";
-  for (const c of contacts) {
+  for (const c of sorted) {
     const btn = doc.createElement("button");
     btn.type = "button";
     btn.className = "omt-contact-item";

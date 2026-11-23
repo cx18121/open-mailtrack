@@ -21,9 +21,13 @@ import {
   scheduledList,
   sectionBar,
   trackedList,
+  type ContactSort,
   type Filter,
   type Section,
+  type SortBy,
   type ThreadContactRecord,
+  type TimeRange,
+  type TypeFilter,
 } from "./tracked.js";
 import { hasPixel } from "./tracking.js";
 
@@ -550,7 +554,12 @@ async function main() {
     pendingRouteState = null;
 
     let filter: Filter = "all";
+    let messageQuery = "";
+    let timeRange: TimeRange = "all";
+    let typeFilter: TypeFilter = "all";
+    let sortBy: SortBy = "default";
     let contactQuery = "";
+    let contactSort: ContactSort = "last_opened";
     let messages: TrackedMessage[] = [];
     let scheduled: OutboxItem[] = [];
     let contacts: ContactSummary[] = [];
@@ -581,10 +590,10 @@ async function main() {
     };
 
     const draw = () => {
-      const focused =
-        doc.activeElement instanceof HTMLElement && el.contains(doc.activeElement)
-          ? doc.activeElement.dataset.omtFocus
-          : undefined;
+      const activeEl = doc.activeElement instanceof HTMLElement && el.contains(doc.activeElement) ? doc.activeElement : null;
+      const focused = activeEl?.dataset.omtFocus;
+      const selStart = activeEl instanceof HTMLInputElement ? activeEl.selectionStart : null;
+      const selEnd = activeEl instanceof HTMLInputElement ? activeEl.selectionEnd : null;
       const wrapper = doc.createElement("div");
       wrapper.append(
         sectionBar(
@@ -604,8 +613,36 @@ async function main() {
           trackedList(doc, messages, {
             filter,
             expanded,
+            query: messageQuery,
+            timeRange,
+            typeFilter,
+            sortBy,
             onFilter: (next) => {
               filter = next;
+              draw();
+            },
+            onQuery: (next) => {
+              messageQuery = next;
+              draw();
+            },
+            onTimeRange: (next) => {
+              timeRange = next;
+              draw();
+            },
+            onTypeFilter: (next) => {
+              typeFilter = next;
+              draw();
+            },
+            onSortBy: (next) => {
+              sortBy = next;
+              draw();
+            },
+            onReset: () => {
+              filter = "all";
+              messageQuery = "";
+              timeRange = "all";
+              typeFilter = "all";
+              sortBy = "default";
               draw();
             },
             onOpen: (m) => openThreadById(m.gmail_thread_id, m),
@@ -705,8 +742,13 @@ async function main() {
         wrapper.append(
           contactsList(doc, filtered, {
             query: contactQuery,
+            sortBy: contactSort,
             onQuery: (next) => {
               contactQuery = next;
+              draw();
+            },
+            onSortBy: (next) => {
+              contactSort = next;
               draw();
             },
             onSelect: (email) => void loadContactDetail(email),
@@ -715,7 +757,17 @@ async function main() {
       }
 
       el.replaceChildren(wrapper);
-      if (focused) el.querySelector<HTMLElement>(`[data-omt-focus="${CSS.escape(focused)}"]`)?.focus();
+      if (focused) {
+        const nextFocused = el.querySelector<HTMLElement>(`[data-omt-focus="${CSS.escape(focused)}"]`);
+        nextFocused?.focus();
+        if (nextFocused instanceof HTMLInputElement && selStart !== null && selEnd !== null) {
+          try {
+            nextFocused.setSelectionRange(selStart, selEnd);
+          } catch {
+            // ignore inputs that do not support selection ranges
+          }
+        }
+      }
     };
 
     const render = async () => {
