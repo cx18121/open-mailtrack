@@ -31,13 +31,8 @@
     <label>Server URL <input id="serverUrl" placeholder="https://t.example.com" /></label>
     <label>API key <input id="apiKey" type="password" /></label>
     <label>
-      Undo Send delay
-      <select id="undoDelaySec">
-        <option value="0">Off (send immediately)</option>
-        <option value="5">5 seconds (default)</option>
-        <option value="10">10 seconds</option>
-        <option value="20">20 seconds</option>
-      </select>
+      Undo Send delay (seconds, 0 to disable)
+      <input id="undoDelaySec" type="number" min="0" max="60" step="0.1" value="5" placeholder="5" />
     </label>
     <div class="row">
       <button id="save" class="primary">Save</button>

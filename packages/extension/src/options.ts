@@ -67,18 +67,22 @@ loadSettings().then((s) => {
   if (!s) return;
   $("serverUrl").value = s.serverUrl;
   $("apiKey").value = s.apiKey;
-  $<HTMLSelectElement>("undoDelaySec").value = String(s.undoDelaySec ?? DEFAULT_UNDO_DELAY_SEC);
+  $("undoDelaySec").value = String(s.undoDelaySec ?? DEFAULT_UNDO_DELAY_SEC);
   void refreshAccounts();
 });
 
 $("save").addEventListener("click", async () => {
   const serverUrl = $("serverUrl").value.trim();
   const apiKey = $("apiKey").value.trim();
-  const undoDelaySec = Number($<HTMLSelectElement>("undoDelaySec").value);
+  const undoDelaySec = Number($("undoDelaySec").value);
   try {
     new URL(serverUrl);
   } catch {
     setMessage($("status"), "Server URL must be a full URL", false);
+    return;
+  }
+  if (!Number.isFinite(undoDelaySec) || undoDelaySec < 0 || undoDelaySec > 60) {
+    setMessage($("status"), "Undo delay must be between 0 and 60 seconds", false);
     return;
   }
   await saveSettings({ serverUrl, apiKey, undoDelaySec });
