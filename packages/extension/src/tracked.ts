@@ -26,7 +26,6 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
 export type Section = "messages" | "scheduled" | "contacts";
 export type Filter = "all" | "opened" | "unopened" | "hot" | "followup" | "replied" | "apple_mpp";
 export type TimeRange = "all" | "24h" | "7d" | "30d";
-export type TypeFilter = "all" | "direct" | "group" | "unreplied";
 export type SortBy = "default" | "last_opened" | "most_opens" | "newest" | "oldest";
 export type ContactSort = "last_opened" | "most_opened" | "open_rate" | "most_emailed";
 
@@ -71,15 +70,111 @@ function matchesChip(m: TrackedMessage, key: Filter, now: number): boolean {
   }
 }
 
-const FILTERS: { key: Filter; label: string; hideWhenZero?: boolean }[] = [
-  { key: "all", label: "All" },
-  { key: "opened", label: "Opened" },
-  { key: "unopened", label: "Not opened" },
-  { key: "hot", label: "Hot / Reopened" },
-  { key: "followup", label: "Needs follow-up" },
-  { key: "replied", label: "Replied" },
-  { key: "apple_mpp", label: "Apple proxy", hideWhenZero: true },
+const FILTERS: { key: Filter; label: string; group: "state" | "lens"; title?: string; hideWhenZero?: boolean }[] = [
+  { key: "all", label: "All", group: "state" },
+  { key: "opened", label: "Opened", group: "state" },
+  { key: "unopened", label: "Not opened", group: "state" },
+  { key: "followup", label: "Needs follow-up", group: "lens", title: "Sent 1 to 30 days ago with no reply" },
+  { key: "hot", label: "Hot", group: "lens", title: "3+ opens or reopened later" },
+  { key: "replied", label: "Replied", group: "lens" },
+  { key: "apple_mpp", label: "Apple proxy", group: "lens", hideWhenZero: true },
 ];
+
+function defaultSortLabel(filter: Filter): string {
+  switch (filter) {
+    case "unopened":
+      return "Oldest sent";
+    case "followup":
+      return "Priority";
+    case "hot":
+      return "Most opens";
+    default:
+      return "Recent";
+  }
+}
+
+const SEARCH_ICON_SVG =
+  '<svg class="omt-search-icon" viewBox="0 0 20 20" width="15" height="15" aria-hidden="true"><path d="M8.5 3a5.5 5.5 0 0 1 4.38 8.82l3.65 3.65a.75.75 0 1 1-1.06 1.06l-3.65-3.65A5.5 5.5 0 1 1 8.5 3Zm0 1.5a4 4 0 1 0 0 8 4 4 0 0 0 0-8Z" fill="currentColor"/></svg>';
+
+const CHEVRON_ICON_SVG =
+  '<svg class="omt-select-caret" viewBox="0 0 20 20" width="16" height="16" aria-hidden="true"><path d="M5.75 7.75 10 12l4.25-4.25" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+
+function makeSearchInput(
+  doc: Document,
+  focusKey: string,
+  placeholder: string,
+  value: string,
+  onInput: (next: string) => void,
+): HTMLElement {
+  const wrap = doc.createElement("div");
+  wrap.className = "omt-search-wrap";
+  wrap.innerHTML = SEARCH_ICON_SVG;
+  const search = doc.createElement("input");
+  search.type = "search";
+  search.className = "omt-search";
+  search.placeholder = placeholder;
+  search.value = value;
+  search.dataset.omtFocus = focusKey;
+  search.addEventListener("input", () => onInput(search.value));
+  wrap.append(search);
+  return wrap;
+}
+
+function makeSelectControl<T extends string>(
+  doc: Document,
+  opts: {
+    focusKey: string;
+    value: T;
+    ariaLabel: string;
+    options: [T, string][];
+    displayLabel?: string;
+    prefix?: string;
+    active?: boolean;
+    ghost?: boolean;
+    extraClass?: string;
+    onChange: (next: T) => void;
+  },
+): HTMLElement {
+  const wrap = doc.createElement("label");
+  wrap.className = [
+    "omt-select-wrap",
+    opts.ghost ? "omt-select-ghost" : "",
+    opts.active ? "omt-select-active" : "",
+    opts.extraClass ?? "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
+  if (opts.prefix) {
+    const prefix = doc.createElement("span");
+    prefix.className = "omt-select-prefix";
+    prefix.textContent = opts.prefix;
+    wrap.append(prefix);
+  }
+
+  const selectedText = opts.displayLabel ?? opts.options.find(([val]) => val === opts.value)?.[1] ?? "";
+  const label = doc.createElement("span");
+  label.className = "omt-select-label";
+  label.textContent = selectedText;
+  wrap.append(label);
+
+  wrap.insertAdjacentHTML("beforeend", CHEVRON_ICON_SVG);
+
+  const sel = doc.createElement("select");
+  sel.className = "omt-select";
+  sel.setAttribute("aria-label", opts.ariaLabel);
+  sel.dataset.omtFocus = opts.focusKey;
+  for (const [val, text] of opts.options) {
+    const opt = doc.createElement("option");
+    opt.value = val;
+    opt.textContent = text;
+    opt.selected = val === opts.value;
+    sel.append(opt);
+  }
+  sel.addEventListener("change", () => opts.onChange(sel.value as T));
+  wrap.append(sel);
+  return wrap;
+}
 
 export type ListState = {
   filter: Filter;
@@ -87,14 +182,12 @@ export type ListState = {
   expanded: ReadonlySet<string>;
   query?: string;
   timeRange?: TimeRange;
-  typeFilter?: TypeFilter;
   sortBy?: SortBy;
   onFilter: (next: Filter) => void;
   onOpen: (message: TrackedMessage) => void;
   onToggle: (id: string) => void;
   onQuery?: (next: string) => void;
   onTimeRange?: (next: TimeRange) => void;
-  onTypeFilter?: (next: TypeFilter) => void;
   onSortBy?: (next: SortBy) => void;
   onReset?: () => void;
   onContactClick?: (email: string) => void;
@@ -134,7 +227,7 @@ export function sectionBar(
   return nav;
 }
 
-/** The Tracked Messages list in Gmail's visual language, with status chips, search, time/type filters, and sort. */
+/** The Tracked Messages list in Gmail's visual language, with status chips, search, time filter, and sort. */
 export function trackedList(
   doc: Document,
   all: TrackedMessage[],
@@ -143,14 +236,12 @@ export function trackedList(
     expanded,
     query = "",
     timeRange = "all",
-    typeFilter = "all",
     sortBy = "default",
     onFilter,
     onOpen,
     onToggle,
     onQuery,
     onTimeRange,
-    onTypeFilter,
     onSortBy,
     onReset,
     onContactClick,
@@ -174,24 +265,30 @@ export function trackedList(
       const latestActivity = Math.max(sentAt, m.lastOpenAt ?? 0);
       if (latestActivity < cutoff) return false;
     }
-    if (typeFilter === "direct" && m.recipients.length !== 1) return false;
-    if (typeFilter === "group" && m.recipients.length < 2) return false;
-    if (typeFilter === "unreplied" && m.replied_at) return false;
     return true;
   });
 
   const bar = doc.createElement("div");
   bar.className = "omt-chips";
   bar.setAttribute("role", "tablist");
+  let prevGroup: "state" | "lens" | null = null;
   for (const f of FILTERS) {
     const count = base.filter((m) => matchesChip(m, f.key, now)).length;
     if (f.hideWhenZero && count === 0 && filter !== f.key) continue;
+    if (prevGroup && prevGroup !== f.group) {
+      const sep = doc.createElement("span");
+      sep.className = "omt-chip-sep";
+      sep.setAttribute("aria-hidden", "true");
+      bar.append(sep);
+    }
+    prevGroup = f.group;
     const chip = doc.createElement("button");
     chip.type = "button";
     chip.className = `omt-chip${f.key === filter ? " omt-chip-active" : ""}`;
     chip.setAttribute("role", "tab");
     chip.dataset.omtFocus = `chip:${f.key}`;
     chip.setAttribute("aria-selected", String(f.key === filter));
+    if (f.title) chip.title = f.title;
     chip.append(f.label);
     const n = doc.createElement("span");
     n.className = "omt-chip-count";
@@ -210,103 +307,64 @@ export function trackedList(
   }
   root.append(bar);
 
-  if (onQuery || onTimeRange || onTypeFilter || onSortBy) {
+  if (onQuery || onTimeRange || onSortBy) {
     const toolbar = doc.createElement("div");
     toolbar.className = "omt-toolbar";
 
     if (onQuery) {
-      const search = doc.createElement("input");
-      search.type = "search";
-      search.className = "omt-search";
-      search.placeholder = "Filter by recipient or subject…";
-      search.value = query;
-      search.dataset.omtFocus = "messages:search";
-      search.addEventListener("input", () => onQuery(search.value));
-      toolbar.append(search);
+      toolbar.append(makeSearchInput(doc, "messages:search", "Search recipient or subject…", query, onQuery));
     }
-
-    const makeSelect = <T extends string>(
-      focusKey: string,
-      value: T,
-      ariaLabel: string,
-      options: [T, string][],
-      onChange: (next: T) => void,
-    ) => {
-      const sel = doc.createElement("select");
-      sel.className = "omt-select";
-      sel.setAttribute("aria-label", ariaLabel);
-      sel.dataset.omtFocus = focusKey;
-      for (const [val, label] of options) {
-        const opt = doc.createElement("option");
-        opt.value = val;
-        opt.textContent = label;
-        opt.selected = val === value;
-        sel.append(opt);
-      }
-      sel.addEventListener("change", () => onChange(sel.value as T));
-      return sel;
-    };
 
     if (onTimeRange) {
       toolbar.append(
-        makeSelect<TimeRange>(
-          "messages:time",
-          timeRange,
-          "Time range",
-          [
+        makeSelectControl<TimeRange>(doc, {
+          focusKey: "messages:time",
+          value: timeRange,
+          ariaLabel: "Time range",
+          active: timeRange !== "all",
+          options: [
             ["all", "All time"],
             ["24h", "Last 24 hours"],
             ["7d", "Last 7 days"],
             ["30d", "Last 30 days"],
           ],
-          onTimeRange,
-        ),
+          onChange: onTimeRange,
+        }),
       );
     }
 
-    if (onTypeFilter) {
-      toolbar.append(
-        makeSelect<TypeFilter>(
-          "messages:type",
-          typeFilter,
-          "Email type",
-          [
-            ["all", "All emails"],
-            ["direct", "1-to-1 only"],
-            ["group", "Group only"],
-            ["unreplied", "No reply yet"],
-          ],
-          onTypeFilter,
-        ),
-      );
-    }
-
-    if (onSortBy) {
-      toolbar.append(
-        makeSelect<SortBy>(
-          "messages:sort",
-          sortBy,
-          "Sort messages",
-          [
-            ["default", "Sort: Default"],
-            ["last_opened", "Sort: Last opened"],
-            ["most_opens", "Sort: Most opens"],
-            ["newest", "Sort: Newest sent"],
-            ["oldest", "Sort: Oldest sent"],
-          ],
-          onSortBy,
-        ),
-      );
-    }
-
-    const hasActiveControls = Boolean(trimmedQuery) || timeRange !== "all" || typeFilter !== "all" || sortBy !== "default" || filter !== "all";
+    const hasActiveControls = Boolean(trimmedQuery) || timeRange !== "all" || sortBy !== "default" || filter !== "all";
     if (hasActiveControls && onReset) {
       const clear = doc.createElement("button");
       clear.type = "button";
-      clear.className = "omt-btn";
-      clear.textContent = "Clear";
+      clear.className = "omt-clear-btn";
+      clear.textContent = "Clear filters";
       clear.addEventListener("click", () => onReset());
       toolbar.append(clear);
+    }
+
+    if (onSortBy) {
+      const autoLabel = defaultSortLabel(filter);
+      toolbar.append(
+        makeSelectControl<SortBy>(doc, {
+          focusKey: "messages:sort",
+          value: sortBy,
+          ariaLabel: "Sort messages",
+          prefix: "Sort:",
+          ghost: true,
+          active: sortBy !== "default",
+          extraClass: "omt-select-sort",
+          displayLabel: sortBy === "default" ? autoLabel : undefined,
+          options: [
+            ["default", `Default (${autoLabel})`],
+            ["last_opened", "Last opened"],
+            ["most_opens", "Most opens"],
+            ["newest", "Newest sent"],
+            ["oldest", "Oldest sent"],
+          ],
+          onChange: onSortBy,
+        }),
+      );
     }
 
     root.append(toolbar);
@@ -557,36 +615,28 @@ export function contactsList(doc: Document, contacts: ContactSummary[], state: C
 
   const searchBar = doc.createElement("div");
   searchBar.className = "omt-toolbar";
-  const input = doc.createElement("input");
-  input.type = "search";
-  input.className = "omt-search";
-  input.placeholder = "Filter contacts by email…";
-  input.value = state.query;
-  input.dataset.omtFocus = "contacts:search";
-  input.addEventListener("input", () => state.onQuery(input.value));
-  searchBar.append(input);
+  searchBar.append(makeSearchInput(doc, "contacts:search", "Search contacts by email…", state.query, state.onQuery));
 
   if (state.onSortBy) {
     const sortBy = state.sortBy ?? "last_opened";
-    const sel = doc.createElement("select");
-    sel.className = "omt-select";
-    sel.setAttribute("aria-label", "Sort contacts");
-    sel.dataset.omtFocus = "contacts:sort";
-    const opts: [ContactSort, string][] = [
-      ["last_opened", "Sort: Last opened"],
-      ["most_opened", "Sort: Most opens"],
-      ["open_rate", "Sort: Open rate"],
-      ["most_emailed", "Sort: Most emailed"],
-    ];
-    for (const [val, label] of opts) {
-      const opt = doc.createElement("option");
-      opt.value = val;
-      opt.textContent = label;
-      opt.selected = val === sortBy;
-      sel.append(opt);
-    }
-    sel.addEventListener("change", () => state.onSortBy!(sel.value as ContactSort));
-    searchBar.append(sel);
+    searchBar.append(
+      makeSelectControl<ContactSort>(doc, {
+        focusKey: "contacts:sort",
+        value: sortBy,
+        ariaLabel: "Sort contacts",
+        prefix: "Sort:",
+        ghost: true,
+        active: sortBy !== "last_opened",
+        extraClass: "omt-select-sort",
+        options: [
+          ["last_opened", "Last opened"],
+          ["most_opened", "Most opens"],
+          ["open_rate", "Open rate"],
+          ["most_emailed", "Most emailed"],
+        ],
+        onChange: state.onSortBy,
+      }),
+    );
   }
   root.append(searchBar);
 

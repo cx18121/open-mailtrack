@@ -54,10 +54,11 @@ describe("trackedList", () => {
       "All2",
       "Opened1",
       "Not opened1",
-      "Hot / Reopened1",
       "Needs follow-up0",
+      "Hot1",
       "Replied0",
     ]);
+    expect(el.querySelectorAll(".omt-chip-sep")).toHaveLength(1);
     expect(rows[0].tagName).toBe("A");
     expect(rows[0].querySelector(".omt-status-late")!.textContent).toBe("3 days after sending");
     expect(rows[0].querySelector(".omt-tracked-to")!.textContent).toBe("ana");
@@ -257,27 +258,25 @@ describe("trackedList", () => {
     expect(onOpenThread).toHaveBeenCalledOnce();
   });
 
-  it("supports search, time range, type filter, Hot/Reopened/Replied/Apple proxy chips, sorting, and contact sorting", () => {
+  it("supports search, time range, Hot/Replied/Apple proxy chips, contextual sort labels, and contact sorting", () => {
     const items = [
       msg({ id: "1", subject: "Exa Offer", recipients: ["lauren@exa.ai"], sent_at: h(5), opens: 5, lastOpenAt: h(1) }),
       msg({ id: "2", subject: "Group kickoff", recipients: ["a@x.com", "b@x.com"], sent_at: h(40), opens: 1, lastOpenAt: h(2), replied_at: h(1) }),
       msg({ id: "3", subject: "Old note", recipients: ["old@x.com"], sent_at: h(24 * 20), opens: 0, appleMpp: 1, lastAppleMppAt: h(24 * 19) }),
     ];
 
-    // Search + group filter + chip counts reflect active slice
-    const groupOnly = trackedList(document, items, state({ typeFilter: "group" }), now);
-    expect([...groupOnly.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Group kickoff"]);
-
     const searchExa = trackedList(document, items, state({ query: "exa" }), now);
     expect([...searchExa.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Exa Offer"]);
 
-    // Time range 24h excludes 20-day old message
-    const last24h = trackedList(document, items, state({ timeRange: "24h" }), now);
+    // Time range 24h excludes 20-day old message and marks the time selector active
+    const last24h = trackedList(document, items, state({ timeRange: "24h", onTimeRange: () => {} }), now);
     expect([...last24h.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Exa Offer", "Group kickoff"]);
+    expect(last24h.querySelector(".omt-select-wrap")?.classList.contains("omt-select-active")).toBe(true);
 
-    // Hot / Reopened chip picks >= 3 opens
-    const hot = trackedList(document, items, state({ filter: "hot" }), now);
+    // Hot chip picks >= 3 opens and shows "Most opens" as default sort label
+    const hot = trackedList(document, items, state({ filter: "hot", onSortBy: () => {} }), now);
     expect([...hot.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Exa Offer"]);
+    expect(hot.querySelector(".omt-select-sort .omt-select-label")?.textContent).toBe("Most opens");
 
     // Replied chip picks replied messages
     const replied = trackedList(document, items, state({ filter: "replied" }), now);
@@ -301,15 +300,16 @@ describe("trackedList", () => {
       "Exa Offer",
     ]);
 
-    // Clear button resets filters when toolbar callbacks are wired
+    // Clear filters button resets filters when toolbar callbacks are wired; only time & sort selects exist
     const onReset = vi.fn();
     const withToolbar = trackedList(
       document,
       items,
-      state({ query: "exa", onQuery: () => {}, onTimeRange: () => {}, onTypeFilter: () => {}, onSortBy: () => {}, onReset }),
+      state({ query: "exa", onQuery: () => {}, onTimeRange: () => {}, onSortBy: () => {}, onReset }),
       now,
     );
-    withToolbar.querySelector<HTMLButtonElement>(".omt-toolbar .omt-btn")!.click();
+    expect(withToolbar.querySelectorAll(".omt-toolbar select")).toHaveLength(2);
+    withToolbar.querySelector<HTMLButtonElement>(".omt-toolbar .omt-clear-btn")!.click();
     expect(onReset).toHaveBeenCalledOnce();
 
     // Contact sorting by open rate and most emailed

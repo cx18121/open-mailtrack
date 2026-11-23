@@ -27,7 +27,6 @@ import {
   type SortBy,
   type ThreadContactRecord,
   type TimeRange,
-  type TypeFilter,
 } from "./tracked.js";
 import { hasPixel } from "./tracking.js";
 
@@ -556,7 +555,6 @@ async function main() {
     let filter: Filter = "all";
     let messageQuery = "";
     let timeRange: TimeRange = "all";
-    let typeFilter: TypeFilter = "all";
     let sortBy: SortBy = "default";
     let contactQuery = "";
     let contactSort: ContactSort = "last_opened";
@@ -615,7 +613,6 @@ async function main() {
             expanded,
             query: messageQuery,
             timeRange,
-            typeFilter,
             sortBy,
             onFilter: (next) => {
               filter = next;
@@ -629,10 +626,6 @@ async function main() {
               timeRange = next;
               draw();
             },
-            onTypeFilter: (next) => {
-              typeFilter = next;
-              draw();
-            },
             onSortBy: (next) => {
               sortBy = next;
               draw();
@@ -641,7 +634,6 @@ async function main() {
               filter = "all";
               messageQuery = "";
               timeRange = "all";
-              typeFilter = "all";
               sortBy = "default";
               draw();
             },
