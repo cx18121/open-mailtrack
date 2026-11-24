@@ -18,6 +18,13 @@ export type ThreadReplyHeaders = {
   subject?: string;
 };
 
+export type ThreadActivity = {
+  repliedAt: number | null;
+  repliedBy: { email: string; at: number }[];
+  bouncedAt: number | null;
+  bounceReason: string | null;
+};
+
 export type ReplaceSentArgs = {
   sentMessageIds: string[];
   recipientTokens: string[];
@@ -27,17 +34,35 @@ export type ReplaceSentArgs = {
   sentAt: number;
 };
 
+export type ReplaceSentResult = {
+  gmailMessageId: string;
+  gmailThreadId: string;
+  cleanedCopies?: number;
+  expectedCopies?: number;
+};
+
+export type CleanupSentArgs = {
+  sentMessageIds: string[];
+  recipientTokens: string[];
+  keepMessageId: string;
+  sentAt: number;
+};
+
 export interface MailboxTransport {
   readonly email: string;
   verify(): Promise<void>;
   getThreadReplyHeaders(threadId: string): Promise<ThreadReplyHeaders | null>;
   /** Returns the earliest reply timestamp from someone other than `senderEmail` in `threadId` after `sentAt`, or null. */
   getThreadReplyAt?(threadId: string, sentAt: number, senderEmail: string): Promise<number | null>;
+  /** Inspects a thread for human replies (with senders) and delivery bounces after `sentAt`. */
+  inspectThreadActivity?(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity>;
   getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null>;
   deleteDraft(draftId?: string | null, draftMessageId?: string | null): Promise<void>;
   createDraft(raw: Buffer, threadId?: string | null): Promise<{ draftId: string; messageId: string }>;
   sendSmtpCopy(envelopeFrom: string, envelopeTo: string, raw: Buffer): Promise<void>;
-  replaceSentCopies(args: ReplaceSentArgs): Promise<{ gmailMessageId: string; gmailThreadId: string }>;
+  replaceSentCopies(args: ReplaceSentArgs): Promise<ReplaceSentResult>;
+  /** Sweeps Sent for any stray pixel-bearing SMTP copies that Gmail indexed after initial send. */
+  cleanupSentCopies?(args: CleanupSentArgs): Promise<number>;
 }
 
 const GMAIL_API = "https://gmail.googleapis.com/gmail/v1/users/me";
@@ -78,12 +103,70 @@ export async function fetchGoogleProfileEmail(accessToken: string): Promise<stri
   return data.emailAddress.toLowerCase();
 }
 
-async function rawMatchesOwnTokens(raw: Buffer, senderEmail: string, tokens: string[]): Promise<boolean> {
+const BOUNCE_LOCAL_PARTS = /^(mailer-daemon|postmaster)$/i;
+const BOUNCE_SUBJECT = /\b(delivery status notification|undeliverable|returned mail|mail delivery subsystem|failure notice|address not found)\b/i;
+const DELAY_SUBJECT = /\b(delay|delayed|delivery incomplete|temporary failure|still trying|warning)\b/i;
+
+export type MessageHeaderSummary = {
+  from?: string;
+  subject?: string;
+  autoSubmitted?: string;
+  returnPath?: string;
+  failedRecipients?: string;
+  contentType?: string;
+};
+
+export type DsnClassification =
+  | { kind: "bounce"; reason: string }
+  | { kind: "delay"; reason: string }
+  | { kind: "human"; reason: null };
+
+/**
+ * Classifies whether a thread message is a permanent delivery bounce, a temporary delivery delay
+ * warning (such as Gmail's "Delivery Status Notification (Delay)"), or a regular human message.
+ */
+export function classifyDsnMessage(h: MessageHeaderSummary): DsnClassification {
+  const fromEmail = h.from ? extractEmailAddress(h.from) : "";
+  const localPart = fromEmail.split("@")[0] ?? "";
+  const failed = h.failedRecipients?.trim();
+  const subject = h.subject?.trim() || null;
+  const isDelaySubject = Boolean(subject && DELAY_SUBJECT.test(subject));
+  const isDsnReport = Boolean(h.contentType && /report-type\s*=\s*"?delivery-status"?/i.test(h.contentType));
+  const isDaemonSender = Boolean(localPart && BOUNCE_LOCAL_PARTS.test(localPart));
+  const emptyReturnPath = h.returnPath?.trim() === "<>";
+  const auto = (h.autoSubmitted ?? "").trim().toLowerCase();
+  const isAutoDsn = emptyReturnPath && Boolean(auto) && auto !== "no" && Boolean(subject && BOUNCE_SUBJECT.test(subject));
+
+  if (isDelaySubject && (isDaemonSender || isDsnReport || isAutoDsn)) {
+    return { kind: "delay", reason: subject! };
+  }
+  if (failed) {
+    return { kind: "bounce", reason: `Delivery failed for ${failed}` };
+  }
+  if (isDsnReport) {
+    return { kind: "bounce", reason: subject ?? "Delivery status notification" };
+  }
+  if (isDaemonSender) {
+    return { kind: "bounce", reason: subject ?? `Bounce from ${fromEmail}` };
+  }
+  if (isAutoDsn) {
+    return { kind: "bounce", reason: subject! };
+  }
+  return { kind: "human", reason: null };
+}
+
+/** Identifies permanent Delivery Status Notification (bounce) messages. */
+export function isBounceMessage(h: MessageHeaderSummary): { bounce: boolean; reason: string | null } {
+  const res = classifyDsnMessage(h);
+  return res.kind === "bounce" ? { bounce: true, reason: res.reason } : { bounce: false, reason: null };
+}
+
+async function rawMatchesOwnTokens(raw: Buffer, tokens: string[]): Promise<boolean> {
   if (tokens.length === 0) return false;
   try {
     const parsed = await parseDraftMime(raw);
-    if (parsed.from && extractEmailAddress(parsed.from) !== senderEmail.toLowerCase()) return false;
     const html = parsed.html ?? "";
+    // Tokens are 128-bit random IDs unique to this send, so checking them directly works even with Send-As aliases.
     return tokens.some((tok) => html.includes(`/p/${tok}.gif`));
   } catch {
     return false;
@@ -151,6 +234,115 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
     });
   }
 
+  async function inspectThreadActivity(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity> {
+    const headersQuery = [
+      "From",
+      "Subject",
+      "Auto-Submitted",
+      "Return-Path",
+      "X-Failed-Recipients",
+      "Content-Type",
+    ]
+      .map((h) => `metadataHeaders=${encodeURIComponent(h)}`)
+      .join("&");
+    const res = await gmailFetch(`/threads/${encodeURIComponent(threadId)}?format=metadata&${headersQuery}`);
+    if (res.status === 404) return { repliedAt: null, repliedBy: [], bouncedAt: null, bounceReason: null };
+    if (!res.ok) throw new Error(`Gmail thread reply check failed: HTTP ${res.status}`);
+    const data = (await res.json()) as {
+      messages?: {
+        internalDate?: string;
+        labelIds?: string[];
+        payload?: { headers?: { name: string; value: string }[] };
+      }[];
+    };
+    const me = senderEmail.toLowerCase();
+    let repliedAt: number | null = null;
+    const repliedByMap = new Map<string, number>();
+    let bouncedAt: number | null = null;
+    let bounceReason: string | null = null;
+
+    for (const m of data.messages ?? []) {
+      if (m.labelIds?.includes("DRAFT") || m.labelIds?.includes("TRASH")) continue;
+      const ts = Number(m.internalDate ?? 0);
+      if (!ts || ts <= sentAt) continue;
+      const headers = m.payload?.headers ?? [];
+      const h = (name: string) => headers.find((x) => x.name.toLowerCase() === name)?.value;
+      const fromHeader = h("from") ?? "";
+      const dsn = classifyDsnMessage({
+        from: fromHeader,
+        subject: h("subject"),
+        autoSubmitted: h("auto-submitted"),
+        returnPath: h("return-path"),
+        failedRecipients: h("x-failed-recipients"),
+        contentType: h("content-type"),
+      });
+      if (dsn.kind === "delay") continue;
+      if (dsn.kind === "bounce") {
+        if (bouncedAt === null || ts < bouncedAt) {
+          bouncedAt = ts;
+          bounceReason = dsn.reason;
+        }
+        continue;
+      }
+      const fromEmail = extractEmailAddress(fromHeader);
+      if (!fromEmail || fromEmail === me) continue;
+      if (repliedAt === null || ts < repliedAt) repliedAt = ts;
+      const prev = repliedByMap.get(fromEmail);
+      if (prev === undefined || ts < prev) repliedByMap.set(fromEmail, ts);
+    }
+    const repliedBy = [...repliedByMap.entries()]
+      .map(([email, at]) => ({ email, at }))
+      .sort((a, b) => a.at - b.at);
+    return { repliedAt, repliedBy, bouncedAt, bounceReason };
+  }
+
+  async function cleanupSentCopiesTracked(args: CleanupSentArgs, alreadyTrashed: Set<string>): Promise<number> {
+    const newlyFound = new Set<string>();
+    const expected = args.sentMessageIds.length;
+
+    // Pass A: exact Message-ID lookup (works when Gmail preserves our SMTP Message-ID).
+    for (const msgid of args.sentMessageIds) {
+      const cleanId = msgid.replace(/^<|>$/g, "");
+      const q = encodeURIComponent(`in:sent rfc822msgid:${cleanId}`);
+      const res = await gmailJson<{ messages?: { id: string }[] }>(`/messages?q=${q}&maxResults=5`);
+      for (const m of res.messages ?? []) {
+        if (m.id !== args.keepMessageId && !alreadyTrashed.has(m.id)) newlyFound.add(m.id);
+      }
+    }
+
+    // Pass B: direct SENT label list (no full-text search index lag, handles consumer Gmail Message-ID rewrites & Send-As aliases).
+    if (alreadyTrashed.size + newlyFound.size < expected && args.recipientTokens.length > 0) {
+      const recent = await gmailJson<{ messages?: { id: string }[] }>("/messages?labelIds=SENT&maxResults=25");
+      for (const m of recent.messages ?? []) {
+        if (m.id === args.keepMessageId || alreadyTrashed.has(m.id) || newlyFound.has(m.id)) continue;
+        const rawRes = await gmailFetch(`/messages/${encodeURIComponent(m.id)}?format=raw`);
+        if (!rawRes.ok) continue;
+        const rawData = (await rawRes.json()) as { raw?: string; internalDate?: string };
+        if (!rawData.raw) continue;
+        const internalDate = Number(rawData.internalDate ?? 0);
+        if (internalDate && Math.abs(internalDate - args.sentAt) > 180_000) continue;
+        const rawBuf = Buffer.from(rawData.raw, "base64url");
+        if (await rawMatchesOwnTokens(rawBuf, args.recipientTokens)) {
+          newlyFound.add(m.id);
+        }
+      }
+    }
+
+    let trashedNow = 0;
+    for (const dupId of newlyFound) {
+      // Reversible move to Trash instead of permanent delete.
+      const res = await gmailFetch(`/messages/${encodeURIComponent(dupId)}/trash`, { method: "POST" });
+      if (res.ok || res.status === 404) {
+        alreadyTrashed.add(dupId);
+        if (res.ok) trashedNow++;
+      } else {
+        console.error(`[open-mailtrack] failed trashing duplicate sent copy ${dupId}: HTTP ${res.status}`);
+      }
+    }
+
+    return trashedNow;
+  }
+
   return {
     email,
 
@@ -186,31 +378,11 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       return { inReplyTo: msgId, references, subject: h("subject") };
     },
 
+    inspectThreadActivity,
+
     async getThreadReplyAt(threadId: string, sentAt: number, senderEmail: string): Promise<number | null> {
-      const res = await gmailFetch(
-        `/threads/${encodeURIComponent(threadId)}?format=metadata&metadataHeaders=From`,
-      );
-      if (res.status === 404) return null;
-      if (!res.ok) throw new Error(`Gmail thread reply check failed: HTTP ${res.status}`);
-      const data = (await res.json()) as {
-        messages?: {
-          internalDate?: string;
-          labelIds?: string[];
-          payload?: { headers?: { name: string; value: string }[] };
-        }[];
-      };
-      const me = senderEmail.toLowerCase();
-      let earliest: number | null = null;
-      for (const m of data.messages ?? []) {
-        if (m.labelIds?.includes("DRAFT") || m.labelIds?.includes("TRASH")) continue;
-        const ts = Number(m.internalDate ?? 0);
-        if (!ts || ts <= sentAt) continue;
-        const fromHeader = m.payload?.headers?.find((x) => x.name.toLowerCase() === "from")?.value ?? "";
-        const fromEmail = extractEmailAddress(fromHeader);
-        if (!fromEmail || fromEmail === me) continue;
-        if (earliest === null || ts < earliest) earliest = ts;
-      }
-      return earliest;
+      const activity = await inspectThreadActivity(threadId, sentAt, senderEmail);
+      return activity.repliedAt;
     },
 
     async getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null> {
@@ -270,7 +442,11 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       }
     },
 
-    async replaceSentCopies(args: ReplaceSentArgs): Promise<{ gmailMessageId: string; gmailThreadId: string }> {
+    async cleanupSentCopies(args: CleanupSentArgs): Promise<number> {
+      return cleanupSentCopiesTracked(args, new Set<string>());
+    },
+
+    async replaceSentCopies(args: ReplaceSentArgs): Promise<ReplaceSentResult> {
       // 1. Insert the clean, pixel-free copy into SENT first so the thread never looks missing.
       // If threadId came from a deleted brand-new draft, Gmail returns 404; retry cleanly without threadId.
       const rawB64 = args.cleanRaw.toString("base64url");
@@ -288,55 +464,32 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       }
       const inserted = (await insertRes.json()) as { id: string; threadId: string };
 
-      // 2. Locate the N auto-saved SMTP copies in SENT and move them reversibly to Trash.
-      const toTrash = new Set<string>();
+      // 2. Locate the N auto-saved SMTP copies in SENT and move them reversibly to Trash,
+      // deduplicating trashed IDs across retry iterations so search-index lag cannot over-count.
       const expected = args.sentMessageIds.length;
       const delays = [500, 1000, 1500, 2000];
+      const trashedIds = new Set<string>();
 
       for (const delay of delays) {
         await sleep(delay);
-
-        // Pass A: exact Message-ID lookup (works when Gmail preserves our SMTP Message-ID).
-        for (const msgid of args.sentMessageIds) {
-          const cleanId = msgid.replace(/^<|>$/g, "");
-          const q = encodeURIComponent(`in:sent rfc822msgid:${cleanId}`);
-          const res = await gmailJson<{ messages?: { id: string }[] }>(`/messages?q=${q}&maxResults=5`);
-          for (const m of res.messages ?? []) {
-            if (m.id !== inserted.id) toTrash.add(m.id);
-          }
-        }
-
-        // Pass B: decoded MIME fallback for consumer Gmail accounts that rewrite Message-ID.
-        if (toTrash.size < expected && args.recipientTokens.length > 0) {
-          const q = encodeURIComponent("in:sent newer_than:1d");
-          const recent = await gmailJson<{ messages?: { id: string }[] }>(`/messages?q=${q}&maxResults=25`);
-          for (const m of recent.messages ?? []) {
-            if (m.id === inserted.id || toTrash.has(m.id)) continue;
-            const rawRes = await gmailFetch(`/messages/${encodeURIComponent(m.id)}?format=raw`);
-            if (!rawRes.ok) continue;
-            const rawData = (await rawRes.json()) as { raw?: string; internalDate?: string };
-            if (!rawData.raw) continue;
-            const internalDate = Number(rawData.internalDate ?? 0);
-            if (internalDate && Math.abs(internalDate - args.sentAt) > 120_000) continue;
-            const rawBuf = Buffer.from(rawData.raw, "base64url");
-            if (await rawMatchesOwnTokens(rawBuf, senderLower, args.recipientTokens)) {
-              toTrash.add(m.id);
-            }
-          }
-        }
-
-        if (toTrash.size >= expected) break;
+        await cleanupSentCopiesTracked(
+          {
+            sentMessageIds: args.sentMessageIds,
+            recipientTokens: args.recipientTokens,
+            keepMessageId: inserted.id,
+            sentAt: args.sentAt,
+          },
+          trashedIds,
+        );
+        if (trashedIds.size >= expected) break;
       }
 
-      for (const dupId of toTrash) {
-        // Reversible move to Trash instead of permanent delete.
-        const res = await gmailFetch(`/messages/${encodeURIComponent(dupId)}/trash`, { method: "POST" });
-        if (!res.ok && res.status !== 404) {
-          console.error(`[open-mailtrack] failed trashing duplicate sent copy ${dupId}: HTTP ${res.status}`);
-        }
-      }
-
-      return { gmailMessageId: inserted.id, gmailThreadId: inserted.threadId };
+      return {
+        gmailMessageId: inserted.id,
+        gmailThreadId: inserted.threadId,
+        cleanedCopies: trashedIds.size,
+        expectedCopies: expected,
+      };
     },
   };
 }
@@ -356,8 +509,6 @@ function decToHex(dec: string | bigint | undefined): string {
 }
 
 export function createAppPasswordTransport(email: string, creds: AppPasswordCredentials): MailboxTransport {
-  const senderLower = email.toLowerCase();
-
   function smtpTransporter() {
     return nodemailer.createTransport({
       host: "smtp.gmail.com",
@@ -397,6 +548,76 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
     } finally {
       await client.logout().catch(() => {});
     }
+  }
+
+  async function inspectThreadActivity(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity> {
+    const dec = hexToDec(threadId);
+    if (!dec) return { repliedAt: null, repliedBy: [], bouncedAt: null, bounceReason: null };
+    const me = senderEmail.toLowerCase();
+    return withImap(async (client) => {
+      const list = await client.list();
+      const allMail = list.find((b) => b.specialUse === "\\All")?.path ?? "[Gmail]/All Mail";
+      const lock = await client.getMailboxLock(allMail);
+      try {
+        const uids = await client.search({ threadId: dec }, { uid: true });
+        if (!uids || uids.length === 0) {
+          return { repliedAt: null, repliedBy: [], bouncedAt: null, bounceReason: null };
+        }
+        let repliedAt: number | null = null;
+        const repliedByMap = new Map<string, number>();
+        let bouncedAt: number | null = null;
+        let bounceReason: string | null = null;
+
+        for (const uid of uids) {
+          const msg = await client.fetchOne(
+            String(uid),
+            {
+              envelope: true,
+              internalDate: true,
+              flags: true,
+              headers: ["from", "subject", "auto-submitted", "return-path", "x-failed-recipients", "content-type"],
+            },
+            { uid: true },
+          );
+          if (!msg || msg.flags?.has("\\Draft")) continue;
+          const ts = msg.internalDate ? new Date(msg.internalDate).getTime() : 0;
+          if (!ts || ts <= sentAt) continue;
+          const headerText = msg.headers ? msg.headers.toString("utf8") : "";
+          const getHeader = (name: string) => {
+            const re = new RegExp(`^${name}:\\s*(.+(?:\\r?\\n[ \\t].+)*)`, "im");
+            const m = re.exec(headerText);
+            return m ? m[1].replace(/\r?\n[ \t]+/g, " ").trim() : undefined;
+          };
+          const fromAddr = msg.envelope?.from?.[0]?.address?.toLowerCase() ?? extractEmailAddress(getHeader("from") ?? "");
+          const dsn = classifyDsnMessage({
+            from: fromAddr || getHeader("from"),
+            subject: msg.envelope?.subject ?? getHeader("subject"),
+            autoSubmitted: getHeader("auto-submitted"),
+            returnPath: getHeader("return-path"),
+            failedRecipients: getHeader("x-failed-recipients"),
+            contentType: getHeader("content-type"),
+          });
+          if (dsn.kind === "delay") continue;
+          if (dsn.kind === "bounce") {
+            if (bouncedAt === null || ts < bouncedAt) {
+              bouncedAt = ts;
+              bounceReason = dsn.reason;
+            }
+            continue;
+          }
+          if (!fromAddr || fromAddr === me) continue;
+          if (repliedAt === null || ts < repliedAt) repliedAt = ts;
+          const prev = repliedByMap.get(fromAddr);
+          if (prev === undefined || ts < prev) repliedByMap.set(fromAddr, ts);
+        }
+        const repliedBy = [...repliedByMap.entries()]
+          .map(([email, at]) => ({ email, at }))
+          .sort((a, b) => a.at - b.at);
+        return { repliedAt, repliedBy, bouncedAt, bounceReason };
+      } finally {
+        lock.release();
+      }
+    });
   }
 
   return {
@@ -445,32 +666,11 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
       });
     },
 
+    inspectThreadActivity,
+
     async getThreadReplyAt(threadId: string, sentAt: number, senderEmail: string): Promise<number | null> {
-      const dec = hexToDec(threadId);
-      if (!dec) return null;
-      const me = senderEmail.toLowerCase();
-      return withImap(async (client) => {
-        const list = await client.list();
-        const allMail = list.find((b) => b.specialUse === "\\All")?.path ?? "[Gmail]/All Mail";
-        const lock = await client.getMailboxLock(allMail);
-        try {
-          const uids = await client.search({ threadId: dec }, { uid: true });
-          if (!uids || uids.length === 0) return null;
-          let earliest: number | null = null;
-          for (const uid of uids) {
-            const msg = await client.fetchOne(String(uid), { envelope: true, internalDate: true, flags: true }, { uid: true });
-            if (!msg || msg.flags?.has("\\Draft")) continue;
-            const ts = msg.internalDate ? new Date(msg.internalDate).getTime() : 0;
-            if (!ts || ts <= sentAt) continue;
-            const fromAddr = msg.envelope?.from?.[0]?.address?.toLowerCase() ?? "";
-            if (!fromAddr || fromAddr === me) continue;
-            if (earliest === null || ts < earliest) earliest = ts;
-          }
-          return earliest;
-        } finally {
-          lock.release();
-        }
-      });
+      const activity = await inspectThreadActivity(threadId, sentAt, senderEmail);
+      return activity.repliedAt;
     },
 
     async getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null> {
@@ -534,7 +734,50 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
       }
     },
 
-    async replaceSentCopies(args: ReplaceSentArgs): Promise<{ gmailMessageId: string; gmailThreadId: string }> {
+    async cleanupSentCopies(args: CleanupSentArgs): Promise<number> {
+      const keepDec = hexToDec(args.keepMessageId);
+      return withImap(async (client, boxes) => {
+        const lock = await client.getMailboxLock(boxes.sent);
+        const dupUids = new Set<number>();
+        try {
+          for (const msgid of args.sentMessageIds) {
+            const found = await client.search({ header: { "message-id": msgid } }, { uid: true });
+            for (const uid of found || []) {
+              dupUids.add(uid);
+            }
+          }
+          if (dupUids.size < args.sentMessageIds.length && args.recipientTokens.length > 0) {
+            const recent = await client.search({ since: new Date(Date.now() - 86_400_000) }, { uid: true });
+            const tail = (recent || []).slice(-25);
+            for (const uid of tail) {
+              if (dupUids.has(uid)) continue;
+              const msg = await client.fetchOne(String(uid), { source: true, internalDate: true, emailId: true }, { uid: true });
+              if (!msg || !msg.source) continue;
+              if (keepDec && msg.emailId && String(msg.emailId) === keepDec) continue;
+              const dt = msg.internalDate ? new Date(msg.internalDate).getTime() : 0;
+              if (dt && Math.abs(dt - args.sentAt) > 180_000) continue;
+              if (await rawMatchesOwnTokens(Buffer.from(msg.source), args.recipientTokens)) {
+                dupUids.add(uid);
+              }
+            }
+          }
+          if (keepDec && dupUids.size > 0) {
+            for (const uid of [...dupUids]) {
+              const meta = await client.fetchOne(String(uid), { emailId: true }, { uid: true });
+              if (meta && meta.emailId && String(meta.emailId) === keepDec) dupUids.delete(uid);
+            }
+          }
+          if (dupUids.size > 0) {
+            await client.messageMove([...dupUids], boxes.trash, { uid: true });
+          }
+          return dupUids.size;
+        } finally {
+          lock.release();
+        }
+      });
+    },
+
+    async replaceSentCopies(args: ReplaceSentArgs): Promise<ReplaceSentResult> {
       return withImap(async (client, boxes) => {
         // 1. Append clean pixel-free copy to Sent first.
         const appended = await client.append(boxes.sent, args.cleanRaw, ["\\Seen"], new Date(args.sentAt));
@@ -568,8 +811,8 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
                 const msg = await client.fetchOne(String(uid), { source: true, internalDate: true }, { uid: true });
                 if (!msg || !msg.source) continue;
                 const dt = msg.internalDate ? new Date(msg.internalDate).getTime() : 0;
-                if (dt && Math.abs(dt - args.sentAt) > 120_000) continue;
-                if (await rawMatchesOwnTokens(Buffer.from(msg.source), senderLower, args.recipientTokens)) {
+                if (dt && Math.abs(dt - args.sentAt) > 180_000) continue;
+                if (await rawMatchesOwnTokens(Buffer.from(msg.source), args.recipientTokens)) {
                   dupUids.add(uid);
                 }
               }
@@ -585,7 +828,12 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
           lock.release();
         }
 
-        return { gmailMessageId, gmailThreadId };
+        return {
+          gmailMessageId,
+          gmailThreadId,
+          cleanedCopies: dupUids.size,
+          expectedCopies: args.sentMessageIds.length,
+        };
       });
     },
   };

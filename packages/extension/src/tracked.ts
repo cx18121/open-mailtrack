@@ -13,7 +13,11 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
     const mpp = recs.filter((r) => r.opens === 0 && (r.appleMpp ?? 0) > 0).length;
     if (opened > 0) return `${opened} of ${recs.length} opened, last ${ago(m.lastOpenAt!, now)}`;
     if (mpp > 0) return `Apple Mail proxy (${mpp} of ${recs.length})`;
+    if (m.bounced_at) return `Bounced ${ago(m.bounced_at, now)}`;
     return `Sent ${ago(m.sent_at ?? m.created_at, now)} · not opened`;
+  }
+  if (m.bounced_at) {
+    return `Bounced ${ago(m.bounced_at, now)}`;
   }
   if (m.opens === 0 && (m.appleMpp ?? 0) > 0) {
     return `Apple Mail proxy ${m.lastAppleMppAt ? ago(m.lastAppleMppAt, now) : ""}`.trim();
@@ -24,7 +28,7 @@ export function rowText(m: TrackedMessage, now = Date.now()): string {
 }
 
 export type Section = "messages" | "scheduled" | "contacts";
-export type Filter = "all" | "opened" | "unopened" | "hot" | "followup" | "replied" | "apple_mpp";
+export type Filter = "all" | "opened" | "unopened" | "hot" | "followup" | "replied" | "bounced" | "apple_mpp";
 export type TimeRange = "all" | "24h" | "7d" | "30d";
 export type SortBy = "default" | "last_opened" | "most_opens" | "newest" | "oldest";
 export type ContactSort = "last_opened" | "most_opened" | "open_rate" | "most_emailed";
@@ -38,7 +42,8 @@ const TIME_RANGE_MS: Record<Exclude<TimeRange, "all">, number> = {
 };
 
 export function needsFollowup(m: TrackedMessage, now = Date.now()): boolean {
-  if (m.replied_at || m.followup_dismissed_at) return false;
+  const fullyBounced = Boolean(m.bounced_at) && m.recipients.length <= 1;
+  if (m.replied_at || fullyBounced || m.followup_dismissed_at) return false;
   const age = now - (m.sent_at ?? m.created_at);
   return age >= FOLLOWUP_MIN_AGE_MS && age <= FOLLOWUP_MAX_AGE_MS;
 }
@@ -58,13 +63,15 @@ function matchesChip(m: TrackedMessage, key: Filter, now: number): boolean {
     case "opened":
       return m.opens > 0;
     case "unopened":
-      return m.opens === 0;
+      return m.opens === 0 && (!m.bounced_at || m.recipients.length > 1);
     case "hot":
       return isHotMessage(m);
     case "followup":
       return needsFollowup(m, now);
     case "replied":
       return Boolean(m.replied_at);
+    case "bounced":
+      return Boolean(m.bounced_at);
     case "apple_mpp":
       return isAppleProxyOnly(m);
   }
@@ -77,6 +84,7 @@ const FILTERS: { key: Filter; label: string; group: "state" | "lens"; title?: st
   { key: "followup", label: "Needs follow-up", group: "lens", title: "Sent 1 to 30 days ago with no reply" },
   { key: "hot", label: "Hot", group: "lens", title: "3+ opens or reopened later" },
   { key: "replied", label: "Replied", group: "lens" },
+  { key: "bounced", label: "Bounced", group: "lens", hideWhenZero: true },
   { key: "apple_mpp", label: "Apple proxy", group: "lens", hideWhenZero: true },
 ];
 
@@ -449,7 +457,13 @@ export function trackedList(
     status.textContent = rowText(m, now);
 
     row.append(img, to, subject);
-    if (m.replied_at) {
+    if (m.bounced_at) {
+      const pill = doc.createElement("span");
+      pill.className = "omt-bounced-pill";
+      pill.textContent = "Bounced";
+      if (m.bounce_reason) pill.title = m.bounce_reason;
+      row.append(pill);
+    } else if (m.replied_at) {
       const pill = doc.createElement("span");
       pill.className = "omt-replied-pill";
       pill.textContent = "Replied";
@@ -498,7 +512,7 @@ export function trackedList(
           breakdown.classList.add("omt-tracked-opens");
           item.append(breakdown);
         } else {
-          const times = openList(doc, m.openAts, now, m.appleMppAts ?? []);
+          const times = openList(doc, m.openAts, now, m.appleMppAts ?? [], m.openEvents);
           times.classList.add("omt-tracked-opens");
           item.append(times);
         }

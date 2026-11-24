@@ -134,7 +134,7 @@ describe("pixel", () => {
     expect(await detail()).toMatchObject({ opens: 1, firstOpenAt: openAt, lastOpenAt: openAt, openAts: [openAt] });
     expect((await list()).messages[0]).toMatchObject({ opens: 1, hits: 2 });
     const opened = await status();
-    expect(opened.classifierVersion).toBe(6);
+    expect(opened.classifierVersion).toBe(7);
     expect(opened.messages.gm1.opens).toBe(1);
     expect(opened.threads.gt1).toMatchObject({ tracked: 1, opens: 1, lastOpenAt: openAt });
   });

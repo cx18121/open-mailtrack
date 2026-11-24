@@ -93,6 +93,57 @@ export function createOutboxService(opts: OutboxServiceOptions) {
 
   let timer: ReturnType<typeof setInterval> | null = null;
   let inFlight: Promise<void> | null = null;
+  const cleanupTimers = new Set<ReturnType<typeof setTimeout>>();
+
+  function scheduleDelayedCleanup(args: {
+    accountEmail: string;
+    sentMessageIds: string[];
+    recipientTokens: string[];
+    keepMessageId: string;
+    sentAt: number;
+    remaining: number;
+  }) {
+    const delays = [15_000, 45_000];
+    let left = args.remaining;
+    let idx = 0;
+
+    const runStep = () => {
+      if (left <= 0 || idx >= delays.length) return;
+      const delay = delays[idx++];
+      const t = setTimeout(() => {
+        cleanupTimers.delete(t);
+        const account = db.getAccount(args.accountEmail);
+        if (!account) return;
+        const transport = getTransport(account);
+        if (!transport.cleanupSentCopies) return;
+        void transport
+          .cleanupSentCopies({
+            sentMessageIds: args.sentMessageIds,
+            recipientTokens: args.recipientTokens,
+            keepMessageId: args.keepMessageId,
+            sentAt: args.sentAt,
+          })
+          .then((cleaned) => {
+            left = Math.max(0, left - cleaned);
+            if (left > 0) {
+              if (idx < delays.length) runStep();
+              else {
+                console.warn(
+                  `[open-mailtrack] ${left} duplicate sent copy(s) still not found for ${args.accountEmail} after delayed sweep`,
+                );
+              }
+            }
+          })
+          .catch((err) => {
+            console.error(`[open-mailtrack] delayed sent copy cleanup failed:`, err);
+          });
+      }, delay);
+      t.unref?.();
+      cleanupTimers.add(t);
+    };
+
+    runStep();
+  }
 
   async function processItem(item: OutboxItem): Promise<{ gmailMessageId: string; gmailThreadId: string }> {
     try {
@@ -116,6 +167,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       // For brand-new group emails, link copies to cleanMessageId via References so Reply-All threads cleanly.
       const recipientReferences = payload.references || (tokens.length > 1 ? cleanMessageId : undefined);
       const sentMessageIds: string[] = [];
+      const anyAlreadySent = tokens.some((t) => t.sent_at !== null);
 
       for (const t of tokens) {
         // Checkpoint: never re-send to a recipient whose SMTP copy Gmail already accepted.
@@ -144,7 +196,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         sentMessageIds.push(msgId);
       }
 
-      if (payload.includeSelfDelivery && tokens.every((t) => t.sent_at === null)) {
+      if (payload.includeSelfDelivery && !anyAlreadySent) {
         const selfMsgId = `<${newTokenId()}@${domain}>`;
         const raw = await compileMime({
           from: payload.from,
@@ -186,6 +238,22 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         threadId: item.thread_id,
         sentAt,
       });
+
+      if (
+        gmail.cleanedCopies !== undefined &&
+        gmail.expectedCopies !== undefined &&
+        gmail.cleanedCopies < gmail.expectedCopies &&
+        transport.cleanupSentCopies
+      ) {
+        scheduleDelayedCleanup({
+          accountEmail: item.account_email,
+          sentMessageIds,
+          recipientTokens: tokens.map((t) => t.token),
+          keepMessageId: gmail.gmailMessageId,
+          sentAt,
+          remaining: gmail.expectedCopies - gmail.cleanedCopies,
+        });
+      }
 
       db.completeOutboxSent(
         item.id,
@@ -526,6 +594,8 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         clearInterval(timer);
         timer = null;
       }
+      for (const t of cleanupTimers) clearTimeout(t);
+      cleanupTimers.clear();
     },
 
     async stopAndDrain() {
@@ -533,6 +603,8 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         clearInterval(timer);
         timer = null;
       }
+      for (const t of cleanupTimers) clearTimeout(t);
+      cleanupTimers.clear();
       if (inFlight) {
         await inFlight.catch(() => {});
       }

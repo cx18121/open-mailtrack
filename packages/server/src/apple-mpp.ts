@@ -103,6 +103,23 @@ export class AppleRelayMatcher {
     return new AppleRelayMatcher(new Uint32Array(0), [], 0);
   }
 
+  /** Builds a matcher from user-entered IPs and/or CIDRs (exact IPv4 -> /32, exact IPv6 -> /128). */
+  static fromEntries(entries: string[]): AppleRelayMatcher {
+    const lines: string[] = [];
+    for (const raw of entries) {
+      let item = raw.trim();
+      if (!item || item.startsWith("#")) continue;
+      if (!item.includes("/")) {
+        const version = isIP(item);
+        if (version === 4) item = `${item}/32`;
+        else if (version === 6) item = `${item}/128`;
+        else continue;
+      }
+      lines.push(item);
+    }
+    return AppleRelayMatcher.fromCsv(lines.join("\n"));
+  }
+
   static fromCsv(csv: string): AppleRelayMatcher {
     const v4Ranges: [number, number][] = [];
     const v6Ranges: [bigint, bigint][] = [];

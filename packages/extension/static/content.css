@@ -591,6 +591,23 @@
   font-size: 11px;
   line-height: 18px;
 }
+.omt-bounced-pill {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #fce8e6;
+  color: #b3261e;
+  font-size: 11px;
+  line-height: 18px;
+}
+.omt-status-client {
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #f1f3f4;
+  color: #5f6368;
+  font-size: 11px;
+  line-height: 18px;
+}
 .omt-followup-refresh {
   margin-left: auto;
   height: 32px;

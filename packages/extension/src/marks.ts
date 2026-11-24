@@ -1,4 +1,4 @@
-import type { OpenSummary, RecipientOpenSummary, ThreadSummary } from "./api.js";
+import type { OpenEvent, OpenSummary, RecipientOpenSummary, ThreadSummary } from "./api.js";
 import { ago, clock, day, when } from "./time.js";
 
 const statusIconUrl = (opens: number, appleMpp = 0) =>
@@ -64,18 +64,24 @@ export function rowImage(t: ThreadSummary) {
   return { imageUrl: statusIconUrl(t.opens, t.appleMpp ?? 0), tooltip: rowTooltip(t), orderHint: 0 };
 }
 
-/** Each open's time, oldest first, as shown under "Show all" and in the Tracked tab. */
+/** Each open's time (and client hint when known), oldest first, as shown under "Show all" and in the Tracked tab. */
 export function openList(
   doc: Document,
   openAts: number[],
   now = Date.now(),
   appleMppAts: number[] = [],
+  openEvents?: OpenEvent[],
 ): HTMLUListElement {
   const list = doc.createElement("ul");
   list.className = "omt-status-list";
-  const events: { at: number; kind: "open" | "apple_mpp" }[] = [
-    ...openAts.map((at) => ({ at, kind: "open" as const })),
-    ...appleMppAts.map((at) => ({ at, kind: "apple_mpp" as const })),
+  const openItems: { at: number; kind: "open"; client: string | null }[] =
+    openEvents && openEvents.length === openAts.length
+      ? openEvents.map((e) => ({ at: e.at, kind: "open" as const, client: e.client }))
+      : openAts.map((at) => ({ at, kind: "open" as const, client: null }));
+
+  const events: { at: number; kind: "open" | "apple_mpp"; client: string | null }[] = [
+    ...openItems,
+    ...appleMppAts.map((at) => ({ at, kind: "apple_mpp" as const, client: null })),
   ].sort((a, b) => a.at - b.at);
 
   for (const ev of events) {
@@ -91,6 +97,11 @@ export function openList(
       tag.className = "omt-status-mpp";
       tag.textContent = "Apple Mail privacy proxy";
       li.append(tag);
+    } else if (ev.client) {
+      const client = doc.createElement("span");
+      client.className = "omt-status-client";
+      client.textContent = ev.client;
+      li.append(client);
     }
     list.append(li);
   }
@@ -130,10 +141,12 @@ export function recipientBreakdown(
     const detail = doc.createElement("span");
     detail.className = "omt-recipient-detail";
     if (r.opens > 0) {
+      const lastClient = r.openEvents?.at(-1)?.client;
+      const clientPart = lastClient ? ` · ${lastClient}` : "";
       detail.textContent =
         r.opens === 1
-          ? `Opened ${stamp(r.firstOpenAt!, now)}`
-          : `Opened ${r.opens} times · last ${stamp(r.lastOpenAt!, now)}`;
+          ? `Opened ${stamp(r.firstOpenAt!, now)}${clientPart}`
+          : `Opened ${r.opens} times · last ${stamp(r.lastOpenAt!, now)}${clientPart}`;
     } else if ((r.appleMpp ?? 0) > 0) {
       detail.classList.add("omt-status-mpp");
       detail.textContent = `Apple Mail privacy proxy · ${r.lastAppleMppAt ? stamp(r.lastAppleMppAt, now) : "may have been opened"}`;
@@ -186,6 +199,15 @@ export function statusElement(
     rest.textContent = text.rest;
     line.append(rest);
   }
+  const singleClient = (!s.recipientSummaries || s.recipientSummaries.length <= 1) && s.opens > 0
+    ? s.openEvents?.at(-1)?.client ?? null
+    : null;
+  if (singleClient) {
+    const clientEl = doc.createElement("span");
+    clientEl.className = "omt-status-client";
+    clientEl.textContent = singleClient;
+    line.append(clientEl);
+  }
   if (text.late) {
     const late = doc.createElement("span");
     late.className = "omt-status-late";
@@ -224,7 +246,7 @@ export function statusElement(
     line.append(toggle);
     root.append(breakdown);
   } else if (s.opens > 1 || (s.opens >= 1 && appleMpp > 0) || appleMpp > 1) {
-    const list = openList(doc, s.openAts, now, s.appleMppAts ?? []);
+    const list = openList(doc, s.openAts, now, s.appleMppAts ?? [], s.openEvents);
     const toggle = doc.createElement("button");
     toggle.type = "button";
     toggle.className = "omt-status-toggle";

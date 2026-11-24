@@ -8,7 +8,11 @@
       h2 { font-size: 14px; margin: 20px 0 8px; padding-top: 14px; border-top: 1px solid #e3e3e3; }
       h2:first-child { margin-top: 0; padding-top: 0; border-top: 0; }
       label { display: block; margin: 10px 0 4px; color: #3c4043; }
-      input, select { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #dadce0; border-radius: 4px; font: inherit; }
+      input, select, textarea { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #dadce0; border-radius: 4px; font: inherit; }
+      textarea { min-height: 56px; resize: vertical; }
+      input[type="checkbox"] { width: auto; padding: 0; margin: 0; }
+      .check { display: flex; align-items: center; gap: 8px; margin: 6px 0; cursor: pointer; }
+      .grid2 { display: grid; grid-template-columns: 1fr 2fr; gap: 8px; }
       button { margin-top: 12px; padding: 6px 14px; border: 1px solid #dadce0; border-radius: 4px; background: #fff; font: inherit; cursor: pointer; }
       button.primary { background: #0b57d0; border-color: #0b57d0; color: #fff; }
       button:hover { background: #f2f6fc; }
@@ -70,6 +74,38 @@
       <label>16-character App Password <input id="apPassword" type="password" placeholder="xxxx xxxx xxxx xxxx" /></label>
       <button id="connectAppPass" class="primary">Verify and connect</button>
     </details>
+
+    <h2>Discord alerts &amp; signal hygiene</h2>
+    <p class="hint" id="webhookHint">
+      Receive desktop and mobile push notifications via a Discord channel webhook. Apple Mail privacy proxy and prefetch hits never trigger alerts.
+    </p>
+    <label>
+      Discord Webhook URL
+      <input id="discordWebhook" type="password" placeholder="https://discord.com/api/webhooks/..." />
+    </label>
+    <label class="check"><input id="notifyFirstOpen" type="checkbox" checked /> First confirmed open</label>
+    <label class="check"><input id="notifyHotSpike" type="checkbox" checked /> Hot spikes (3, 5, 10 opens)</label>
+    <label class="check"><input id="notifyRevival" type="checkbox" checked /> Reopened after 2+ days</label>
+    <label class="check"><input id="notifyBounce" type="checkbox" checked /> Bounced emails</label>
+    <label class="check"><input id="digestEnabled" type="checkbox" /> Daily digest summary</label>
+    <div class="grid2">
+      <label>Digest hour (0 to 23) <input id="digestHour" type="number" min="0" max="23" step="1" value="9" /></label>
+      <label>Timezone (IANA) <input id="digestTimezone" placeholder="America/New_York" /></label>
+    </div>
+    <label>
+      Ignored IPs or CIDRs (optional, one per line)
+      <textarea id="ignoredIps" placeholder="203.0.113.4&#10;198.51.100.0/24"></textarea>
+    </label>
+    <p class="hint">
+      Filters direct opens (Outlook, Apple Mail without MPP, Thunderbird) from your office or VPN. Gmail and Apple proxies hide client IPs.
+    </p>
+    <div class="row">
+      <button id="saveServerSettings" class="primary">Save alerts</button>
+      <button id="testDiscord" type="button">Send test</button>
+      <button id="sendDigest" type="button">Send digest</button>
+      <button id="clearWebhook" type="button">Clear webhook</button>
+    </div>
+    <div id="alertsStatus" class="status" style="margin-left:0;margin-top:6px;"></div>
 
     <script src="options.js"></script>
   </body>

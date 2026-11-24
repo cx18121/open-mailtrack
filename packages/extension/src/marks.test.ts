@@ -121,4 +121,30 @@ describe("statusElement", () => {
     links[1].click();
     expect(onContactClick).toHaveBeenCalledWith("bob@example.com");
   });
+
+  it("displays client hints in the status line and expanded open list when openEvents are present", () => {
+    const one = statusElement(
+      document,
+      { ...opened(h(1)), openEvents: [{ at: h(1), client: "iPhone" }] },
+      now,
+    );
+    expect(one.querySelector(".omt-status-client")?.textContent).toBe("iPhone");
+
+    const many = statusElement(
+      document,
+      {
+        ...opened(h(3), h(1)),
+        openEvents: [
+          { at: h(3), client: "Gmail" },
+          { at: h(1), client: "Outlook (iOS)" },
+        ],
+      },
+      now,
+      { expanded: true, onToggle: () => {} },
+    );
+    expect([...many.querySelectorAll(".omt-status-list .omt-status-client")].map((e) => e.textContent)).toEqual([
+      "Gmail",
+      "Outlook (iOS)",
+    ]);
+  });
 });

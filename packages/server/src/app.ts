@@ -4,13 +4,15 @@ import { cors } from "hono/cors";
 import { createAppleRelayStore, type AppleRelayStore } from "./apple-mpp.js";
 import {
   classifyHit,
+  extractOpenEvents,
   summarize,
   CLASSIFIER_VERSION,
+  type OpenEvent,
   type OpenSummary,
   type RecipientOpenSummary,
 } from "./classify.js";
 import { createCipher, type Cipher } from "./crypto.js";
-import type { Account, Db, Hit, Message } from "./db.js";
+import type { Account, Db, Hit, Message, RecipientToken } from "./db.js";
 import {
   createAppPasswordTransport,
   createOAuthTransport,
@@ -18,6 +20,7 @@ import {
   type AppPasswordCredentials,
   type OAuthCredentials,
 } from "./mailbox.js";
+import { createNotifier, type Notifier } from "./notifications.js";
 import {
   createOutboxService,
   defaultTransportFactory,
@@ -27,6 +30,7 @@ import {
   type TransportFactory,
 } from "./outbox.js";
 import { createReplyChecker, type ReplyChecker } from "./replies.js";
+import { createSettingsStore, isValidDiscordWebhookUrl, type ServerSettingsPatch, type SettingsStore } from "./settings.js";
 
 const ID = /^[A-Za-z0-9_-]{22}$/;
 export const newId = () => randomBytes(16).toString("base64url");
@@ -40,14 +44,25 @@ export type Config = {
   encryptionKey?: string;
   googleClientId?: string;
   googleClientSecret?: string;
+  discordWebhookUrl?: string;
+  ignoredIps?: string[];
+  digestHour?: number;
+  digestTimezone?: string;
+  fetchImpl?: typeof fetch;
   appleRelay?: AppleRelayStore;
   transportFactory?: TransportFactory;
   outboxPollMs?: number;
+  digestCheckIntervalMs?: number;
+};
+
+export type RecipientSummaryWithEvents = RecipientOpenSummary & {
+  openEvents: OpenEvent[];
 };
 
 export type MessageSummary = OpenSummary & {
   trackingMode: Message["tracking_mode"];
-  recipientSummaries?: RecipientOpenSummary[];
+  openEvents: OpenEvent[];
+  recipientSummaries?: RecipientSummaryWithEvents[];
 };
 
 export type ThreadSummaryResponse = {
@@ -78,6 +93,12 @@ export function createApp(db: Db, config: Config) {
   const publicUrl = config.publicUrl.replace(/\/$/, "");
   const cipher: Cipher = createCipher(config.encryptionKey?.trim() || config.apiKey);
   const appleRelay = config.appleRelay ?? createAppleRelayStore();
+  const settings: SettingsStore = createSettingsStore(db, cipher, {
+    discordWebhookUrl: config.discordWebhookUrl,
+    ignoredIps: config.ignoredIps,
+    digestHour: config.digestHour,
+    digestTimezone: config.digestTimezone,
+  });
   const transportFactory = config.transportFactory ?? defaultTransportFactory;
   const outbox: OutboxService = createOutboxService({
     db,
@@ -86,11 +107,44 @@ export function createApp(db: Db, config: Config) {
     transportFactory,
     pollMs: config.outboxPollMs,
   });
-  const replyChecker: ReplyChecker = createReplyChecker({
-    db,
-    cipher,
-    transportFactory,
-  });
+
+  type BatchContext = {
+    allMessages: Message[];
+    byThread: Map<string, Message[]>;
+    hitsByMessage: Map<string, Hit[]>;
+    tokensByMessage: Map<string, RecipientToken[]>;
+    viewsByGmailMessageId: Map<string, number[]>;
+  };
+
+  const createBatchContext = (): BatchContext => {
+    const allMessages = db.listMessages();
+    const byThread = new Map<string, Message[]>();
+    for (const m of allMessages) {
+      if (!m.gmail_thread_id) continue;
+      const list = byThread.get(m.gmail_thread_id) ?? [];
+      list.push(m);
+      byThread.set(m.gmail_thread_id, list);
+    }
+    const hitsByMessage = new Map<string, Hit[]>();
+    for (const h of db.listAllHits()) {
+      const list = hitsByMessage.get(h.message_id) ?? [];
+      list.push(h);
+      hitsByMessage.set(h.message_id, list);
+    }
+    const tokensByMessage = new Map<string, RecipientToken[]>();
+    for (const t of db.listAllRecipientTokens()) {
+      const list = tokensByMessage.get(t.message_id) ?? [];
+      list.push(t);
+      tokensByMessage.set(t.message_id, list);
+    }
+    const viewsByGmailMessageId = new Map<string, number[]>();
+    for (const v of db.listAllViews()) {
+      const list = viewsByGmailMessageId.get(v.gmail_message_id) ?? [];
+      list.push(v.at);
+      viewsByGmailMessageId.set(v.gmail_message_id, list);
+    }
+    return { allMessages, byThread, hitsByMessage, tokensByMessage, viewsByGmailMessageId };
+  };
 
   const pendingOAuth = new Map<string, PendingOAuthState>();
   const pruneOAuth = () => {
@@ -100,41 +154,101 @@ export function createApp(db: Db, config: Config) {
     }
   };
 
-  const classifyMessageHits = (m: Message): { raw: Hit[]; classified: ReturnType<typeof classifyHit>[] } => {
+  const classifyMessageHits = (
+    m: Message,
+    ctx?: BatchContext,
+  ): { raw: Hit[]; classified: ReturnType<typeof classifyHit>[]; tokens: RecipientToken[] } => {
     // Per-recipient sends store a pixel-free copy in Sent, so sender views of Sent cannot trigger recipient pixels.
-    const views = m.tracking_mode === "legacy" && m.gmail_message_id ? db.listViews(m.gmail_message_id) : [];
-    const siblings = (m.gmail_thread_id ? db.findByGmailThreadIds([m.gmail_thread_id]) : [m]).filter((t) => t.id !== m.id);
+    const views =
+      m.tracking_mode === "legacy" && m.gmail_message_id
+        ? (ctx ? ctx.viewsByGmailMessageId.get(m.gmail_message_id) ?? [] : db.listViews(m.gmail_message_id))
+        : [];
+    const threadMessages = m.gmail_thread_id
+      ? (ctx ? ctx.byThread.get(m.gmail_thread_id) ?? [m] : db.findByGmailThreadIds([m.gmail_thread_id]))
+      : [m];
+    const siblings = threadMessages.filter((t) => t.id !== m.id);
     const thread = {
       sentAts: [m, ...siblings].map((t) => t.sent_at).filter((t): t is number => t !== null),
-      otherHitAts: siblings.flatMap((t) => db.listHits(t.id).map((h) => h.at)),
+      otherHitAts: siblings.flatMap((t) => (ctx ? ctx.hitsByMessage.get(t.id) ?? [] : db.listHits(t.id)).map((h) => h.at)),
     };
-    const raw = db.listHits(m.id);
-    const classified = raw.map((h) => classifyHit(h, views, thread, { isAppleRelayIp: (ip) => appleRelay.has(ip) }));
-    return { raw, classified };
+    const raw = ctx ? ctx.hitsByMessage.get(m.id) ?? [] : db.listHits(m.id);
+    const tokens =
+      m.tracking_mode === "per_recipient"
+        ? (ctx ? ctx.tokensByMessage.get(m.id) ?? [] : db.listRecipientTokens(m.id))
+        : [];
+    const tokenRecipient = new Map(tokens.map((t) => [t.token, t.recipient.toLowerCase()]));
+    const repliedByMap = new Map(m.replied_by.map((r) => [r.email.toLowerCase(), r.at]));
+
+    const replyCutoffForHit = (h: Hit): number | null => {
+      if (h.recipient_token) {
+        const rec = tokenRecipient.get(h.recipient_token);
+        if (rec && repliedByMap.has(rec)) return repliedByMap.get(rec)!;
+        // Fallback for older rows with `replied_at` but no `replied_by`: safe when there is only one recipient.
+        if (m.replied_by.length === 0 && tokens.length <= 1) return m.replied_at;
+        return null;
+      }
+      if (m.recipients.length <= 1) return m.replied_at;
+      return null;
+    };
+
+    const classified = raw.map((h) =>
+      classifyHit(h, views, thread, {
+        isAppleRelayIp: (ip) => appleRelay.has(ip),
+        isIgnoredIp: (ip) => settings.isIgnoredIp(ip),
+        repliedAt: replyCutoffForHit(h),
+      }),
+    );
+    return { raw, classified, tokens };
   };
 
-  const summaryOf = (m: Message): MessageSummary => {
-    const { raw, classified } = classifyMessageHits(m);
+  const summaryOf = (m: Message, ctx?: BatchContext): MessageSummary => {
+    const { raw, classified, tokens } = classifyMessageHits(m, ctx);
     const base = summarize(classified, m.sent_at);
+    const openEvents = extractOpenEvents(classified);
     if (m.tracking_mode !== "per_recipient") {
-      return { ...base, trackingMode: m.tracking_mode };
+      return { ...base, trackingMode: m.tracking_mode, openEvents };
     }
-    const tokens = db.listRecipientTokens(m.id);
-    const recipientSummaries: RecipientOpenSummary[] = tokens.map((tok) => {
+    const recipientSummaries: RecipientSummaryWithEvents[] = tokens.map((tok) => {
       const subHits = classified.filter((_, i) => raw[i].recipient_token === tok.token);
       return {
         recipient: tok.recipient,
         kind: tok.kind,
         ...summarize(subHits, m.sent_at),
+        openEvents: extractOpenEvents(subHits),
       };
     });
-    return { ...base, trackingMode: m.tracking_mode, recipientSummaries };
+    return { ...base, trackingMode: m.tracking_mode, openEvents, recipientSummaries };
   };
 
   const unsentOutboxMessageIds = () => {
     const pending = db.listOutbox({ statuses: ["queued", "sending", "canceling", "failed"] });
     return new Set(pending.map((o) => o.message_id));
   };
+
+  const notifier: Notifier = createNotifier({
+    db,
+    settings,
+    fetchImpl: config.fetchImpl,
+    digestCheckIntervalMs: config.digestCheckIntervalMs,
+    listDigestMessages: () => {
+      const hidden = unsentOutboxMessageIds();
+      const ctx = createBatchContext();
+      return ctx.allMessages
+        .filter((m) => !hidden.has(m.id))
+        .map((m) => ({ ...m, ...summaryOf(m, ctx) }));
+    },
+  });
+
+  const replyChecker: ReplyChecker = createReplyChecker({
+    db,
+    cipher,
+    transportFactory,
+    onBounce: (args) => {
+      void notifier.notifyBounce(args).catch((err) => {
+        console.error("[open-mailtrack] bounce notification failed:", err);
+      });
+    },
+  });
 
   // Pixel endpoint — supports both per-recipient tokens and legacy message IDs.
   app.get("/p/:file", (c) => {
@@ -145,23 +259,46 @@ export function createApp(db: Db, config: Config) {
       const ip = headers["cf-connecting-ip"] ?? headers["x-forwarded-for"]?.split(",")[0].trim() ?? null;
       const user_agent = headers["user-agent"] ?? null;
       const recipientToken = db.getRecipientToken(id);
-      if (recipientToken) {
-        db.recordHit({
-          message_id: recipientToken.message_id,
-          recipient_token: recipientToken.token,
-          ip,
-          user_agent,
-          headers,
-        });
-      } else {
-        db.recordHit({
-          message_id: id,
-          recipient_token: null,
-          ip,
-          user_agent,
-          headers,
-        });
-      }
+      const messageId = recipientToken ? recipientToken.message_id : id;
+      const now = Date.now();
+      db.recordHit({
+        message_id: messageId,
+        recipient_token: recipientToken ? recipientToken.token : null,
+        at: now,
+        ip,
+        user_agent,
+        headers,
+      });
+
+      // Defer classification and Discord notification off the pixel response path.
+      queueMicrotask(() => {
+        try {
+          const message = db.getMessage(messageId);
+          if (!message) return;
+          const { raw, classified } = classifyMessageHits(message);
+          const latestIdx = raw.length - 1;
+          const latestHit = latestIdx >= 0 ? raw[latestIdx] : null;
+          const latestClassified = latestIdx >= 0 ? classified[latestIdx] : null;
+          if (!latestHit || latestClassified?.kind !== "open") return;
+          const scopeHits = recipientToken
+            ? classified.filter((_, i) => raw[i].recipient_token === recipientToken.token)
+            : classified;
+          const scopeSummary = summarize(scopeHits, message.sent_at);
+          void notifier
+            .notifyOpen({
+              message,
+              summary: scopeSummary,
+              recipient: recipientToken ? recipientToken.recipient : null,
+              client: latestClassified.client ?? null,
+              at: latestHit.at,
+            })
+            .catch((err) => {
+              console.error("[open-mailtrack] open notification failed:", err);
+            });
+        } catch (err) {
+          console.error("[open-mailtrack] pixel notification dispatch failed:", err);
+        }
+      });
     }
     return c.body(GIF, 200, {
       "Content-Type": "image/gif",
@@ -616,11 +753,11 @@ export function createApp(db: Db, config: Config) {
     const offset = Number(c.req.query("offset") ?? 0);
     const limit = Math.min(Number(c.req.query("limit") ?? 100), 500);
     const hidden = unsentOutboxMessageIds();
-    const all = db
-      .listMessages()
+    const ctx = createBatchContext();
+    const all = ctx.allMessages
       .filter((m) => !hidden.has(m.id))
-      .map((m) => ({ ...m, ...summaryOf(m), hits: db.listHits(m.id).length }))
       .filter((m) => !sender || m.sender.toLowerCase() === sender)
+      .map((m) => ({ ...m, ...summaryOf(m, ctx), hits: (ctx.hitsByMessage.get(m.id) ?? []).length }))
       .filter((m) => (m.sent_at ?? m.created_at) >= since || (m.lastOpenAt ?? 0) >= since)
       .sort((a, b) => (b.lastOpenAt ?? 0) - (a.lastOpenAt ?? 0) || (b.sent_at ?? b.created_at) - (a.sent_at ?? a.created_at));
     return c.json({ total: all.length, messages: all.slice(offset, offset + limit) });
@@ -629,8 +766,8 @@ export function createApp(db: Db, config: Config) {
   api.get("/messages/:id", (c) => {
     const message = db.getMessage(c.req.param("id"));
     if (!message) return c.json({ error: "not found" }, 404);
-    const { raw, classified } = classifyMessageHits(message);
-    const tokenMap = new Map(db.listRecipientTokens(message.id).map((t) => [t.token, t.recipient]));
+    const { raw, classified, tokens } = classifyMessageHits(message);
+    const tokenMap = new Map(tokens.map((t) => [t.token, t.recipient]));
     return c.json({
       ...message,
       ...summaryOf(message),
@@ -639,6 +776,7 @@ export function createApp(db: Db, config: Config) {
         recipient: h.recipient_token ? tokenMap.get(h.recipient_token) ?? null : null,
         kind: classified[i].kind,
         reason: classified[i].reason,
+        client: classified[i].client ?? null,
       })),
       views: message.gmail_message_id ? db.listViews(message.gmail_message_id) : [],
     });
@@ -678,6 +816,7 @@ export function createApp(db: Db, config: Config) {
 
   function buildContacts(sender?: string): Map<string, ContactAggregate> {
     const hidden = unsentOutboxMessageIds();
+    const ctx = createBatchContext();
     const contacts = new Map<string, ContactAggregate>();
     const ensure = (email: string): ContactAggregate => {
       const key = email.toLowerCase();
@@ -699,10 +838,10 @@ export function createApp(db: Db, config: Config) {
       return agg;
     };
 
-    for (const m of db.listMessages()) {
+    for (const m of ctx.allMessages) {
       if (hidden.has(m.id)) continue;
       if (sender && m.sender.toLowerCase() !== sender) continue;
-      const summary = summaryOf(m);
+      const summary = summaryOf(m, ctx);
       const sentAt = m.sent_at ?? m.created_at;
 
       if (m.tracking_mode === "per_recipient" && summary.recipientSummaries) {
@@ -816,7 +955,57 @@ export function createApp(db: Db, config: Config) {
     return c.json({ contact: summary, messages: entries });
   });
 
+  // --- Server settings & Discord notifications ---
+
+  api.get("/settings", (c) => {
+    return c.json(settings.getPublic());
+  });
+
+  api.patch("/settings", async (c) => {
+    const body = await c.req.json<ServerSettingsPatch>().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return c.json({ error: "invalid settings payload" }, 400);
+    }
+    if (body.ignoredIps !== undefined && !isStringArray(body.ignoredIps)) {
+      return c.json({ error: "ignoredIps must be an array of strings" }, 400);
+    }
+    try {
+      const updated = settings.update(body);
+      return c.json(updated);
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 400);
+    }
+  });
+
+  api.post("/notifications/test", async (c) => {
+    const body = await c.req
+      .json<{ discordWebhookUrl?: string }>()
+      .catch(() => ({} as { discordWebhookUrl?: string }));
+    const override = body.discordWebhookUrl?.trim();
+    if (override && !isValidDiscordWebhookUrl(override)) {
+      return c.json({ error: "Discord webhook URL must be a valid https://discord.com/api/webhooks/... URL" }, 400);
+    }
+    try {
+      await notifier.sendTest(override || undefined);
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  });
+
+  api.post("/notifications/digest", async (c) => {
+    try {
+      const result = await notifier.sendDigest({ force: true });
+      if (!result.sent) {
+        return c.json({ error: result.skipped === "no_webhook" ? "No Discord webhook URL configured" : `Digest skipped: ${result.skipped}` }, 400);
+      }
+      return c.json({ ok: true });
+    } catch (err) {
+      return c.json({ error: err instanceof Error ? err.message : String(err) }, 502);
+    }
+  });
+
   app.route("/api", api);
 
-  return Object.assign(app, { outbox, replyChecker, appleRelay, cipher });
+  return Object.assign(app, { outbox, replyChecker, notifier, settings, appleRelay, cipher });
 }

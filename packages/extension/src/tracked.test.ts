@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import type { TrackedMessage } from "./api.js";
+import { createStatusBatcher, type TrackedMessage } from "./api.js";
 import {
   contactDetailView,
   contactSidebarCard,
@@ -319,5 +319,58 @@ describe("trackedList", () => {
     expect([...byRate.querySelectorAll(".omt-contact-email")].map((e) => e.textContent)).toEqual(["high@x.com", "low@x.com"]);
     const byEmailed = contactsList(document, [c1, c2], { query: "", sortBy: "most_emailed", onQuery: () => {}, onSortBy: () => {}, onSelect: () => {} }, now);
     expect([...byEmailed.querySelectorAll(".omt-contact-email")].map((e) => e.textContent)).toEqual(["low@x.com", "high@x.com"]);
+  });
+
+  it("badges bounced emails, filters them via Bounced chip, and excludes them from Not opened and Needs follow-up", () => {
+    const bounced = msg({
+      id: "b1",
+      subject: "Bad address",
+      sent_at: h(48),
+      opens: 0,
+      bounced_at: h(47),
+      bounce_reason: "Address not found",
+    });
+    const normal = msg({ id: "n1", subject: "Real lead", sent_at: h(48), opens: 0 });
+
+    expect(needsFollowup(bounced, now)).toBe(false);
+    expect(needsFollowup(normal, now)).toBe(true);
+
+    const unopened = trackedList(document, [bounced, normal], state({ filter: "unopened" }), now);
+    expect([...unopened.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Real lead"]);
+
+    const bouncedView = trackedList(document, [bounced, normal], state({ filter: "bounced" }), now);
+    expect([...bouncedView.querySelectorAll(".omt-tracked-subject")].map((s) => s.textContent)).toEqual(["Bad address"]);
+    expect(bouncedView.querySelector(".omt-bounced-pill")?.textContent).toBe("Bounced");
+    expect(bouncedView.querySelector(".omt-bounced-pill")?.getAttribute("title")).toBe("Address not found");
+
+    // Partial bounce on a group email preserves recipient open breakdown and follow-up visibility
+    const groupPartialBounce = msg({
+      id: "gb1",
+      subject: "Team intro",
+      recipients: ["alice@x.com", "bad@x.com"],
+      sent_at: h(48),
+      opens: 1,
+      lastOpenAt: h(2),
+      bounced_at: h(47),
+      bounce_reason: "Delivery failed for bad@x.com",
+      recipientSummaries: [
+        { recipient: "alice@x.com", kind: "to", opens: 1, firstOpenAt: h(2), lastOpenAt: h(2), openAts: [h(2)], late: null },
+        { recipient: "bad@x.com", kind: "to", opens: 0, firstOpenAt: null, lastOpenAt: null, openAts: [], late: null },
+      ],
+    });
+    expect(needsFollowup(groupPartialBounce, now)).toBe(true);
+    const groupView = trackedList(document, [groupPartialBounce], state({ filter: "all" }), now);
+    expect(groupView.querySelector(".omt-tracked-status")?.textContent).toContain("1 of 2 opened");
+    expect(groupView.querySelector(".omt-bounced-pill")?.textContent).toBe("Bounced");
+  });
+
+  it("settles pending status batcher promises with undefined on network failure", async () => {
+    const fakeApi = {
+      status: vi.fn().mockRejectedValue(new Error("offline")),
+    } as unknown as Parameters<typeof createStatusBatcher>[0];
+    const batcher = createStatusBatcher(fakeApi, 1);
+    const [m, t] = await Promise.all([batcher.message("m1"), batcher.thread("t1")]);
+    expect(m).toBeUndefined();
+    expect(t).toBeUndefined();
   });
 });

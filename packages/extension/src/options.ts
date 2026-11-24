@@ -63,12 +63,44 @@ async function refreshAccounts() {
   }
 }
 
+function applyServerSettingsToForm(s: Awaited<ReturnType<ReturnType<typeof createApi>["getServerSettings"]>>) {
+  const webhookInput = $<HTMLInputElement>("discordWebhook");
+  webhookInput.value = "";
+  webhookInput.placeholder = s.discordWebhookConfigured
+    ? `Configured (${s.discordWebhookMasked ?? "saved"}) — paste new URL to replace`
+    : "https://discord.com/api/webhooks/...";
+  $<HTMLInputElement>("notifyFirstOpen").checked = s.notifyFirstOpen;
+  $<HTMLInputElement>("notifyHotSpike").checked = s.notifyHotSpike;
+  $<HTMLInputElement>("notifyRevival").checked = s.notifyRevival;
+  $<HTMLInputElement>("notifyBounce").checked = s.notifyBounce;
+  $<HTMLInputElement>("digestEnabled").checked = s.digestEnabled;
+  $<HTMLInputElement>("digestHour").value = String(s.digestHour);
+  const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  $<HTMLInputElement>("digestTimezone").value = s.digestTimezone || browserTz;
+  $<HTMLTextAreaElement>("ignoredIps").value = s.ignoredIps.join("\n");
+}
+
+async function refreshServerSettings() {
+  const statusEl = $("alertsStatus");
+  const settings = await loadSettings();
+  if (!settings) return;
+  try {
+    const api = createApi(settings);
+    const serverSettings = await api.getServerSettings();
+    applyServerSettingsToForm(serverSettings);
+    setMessage(statusEl, "");
+  } catch (err) {
+    setMessage(statusEl, `Could not load alert settings: ${(err as Error).message}`, false);
+  }
+}
+
 loadSettings().then((s) => {
   if (!s) return;
   $("serverUrl").value = s.serverUrl;
   $("apiKey").value = s.apiKey;
   $("undoDelaySec").value = String(s.undoDelaySec ?? DEFAULT_UNDO_DELAY_SEC);
   void refreshAccounts();
+  void refreshServerSettings();
 });
 
 $("save").addEventListener("click", async () => {
@@ -89,6 +121,7 @@ $("save").addEventListener("click", async () => {
   await installPixelBlockRule(serverUrl);
   setMessage($("status"), "Saved");
   await refreshAccounts();
+  await refreshServerSettings();
 });
 
 $("connectOAuth").addEventListener("click", async () => {
@@ -126,6 +159,83 @@ $("connectAppPass").addEventListener("click", async () => {
     $("apPassword").value = "";
     setMessage(statusEl, `Connected ${email}`);
     await refreshAccounts();
+  } catch (err) {
+    setMessage(statusEl, (err as Error).message, false);
+  }
+});
+
+$("saveServerSettings").addEventListener("click", async () => {
+  const statusEl = $("alertsStatus");
+  const settings = await loadSettings();
+  if (!settings) return setMessage(statusEl, "Save server settings first.", false);
+  const webhookRaw = $<HTMLInputElement>("discordWebhook").value.trim();
+  const digestHour = Number($<HTMLInputElement>("digestHour").value);
+  if (!Number.isInteger(digestHour) || digestHour < 0 || digestHour > 23) {
+    return setMessage(statusEl, "Digest hour must be an integer from 0 to 23.", false);
+  }
+  const digestTimezone = $<HTMLInputElement>("digestTimezone").value.trim() || Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const ignoredIps = $<HTMLTextAreaElement>("ignoredIps")
+    .value.split(/[\s,]+/)
+    .map((x) => x.trim())
+    .filter(Boolean);
+  try {
+    const api = createApi(settings);
+    const updated = await api.updateServerSettings({
+      ...(webhookRaw ? { discordWebhookUrl: webhookRaw } : {}),
+      notifyFirstOpen: $<HTMLInputElement>("notifyFirstOpen").checked,
+      notifyHotSpike: $<HTMLInputElement>("notifyHotSpike").checked,
+      notifyRevival: $<HTMLInputElement>("notifyRevival").checked,
+      notifyBounce: $<HTMLInputElement>("notifyBounce").checked,
+      digestEnabled: $<HTMLInputElement>("digestEnabled").checked,
+      digestHour,
+      digestTimezone,
+      ignoredIps,
+    });
+    applyServerSettingsToForm(updated);
+    setMessage(statusEl, "Saved alert settings.");
+  } catch (err) {
+    setMessage(statusEl, (err as Error).message, false);
+  }
+});
+
+$("clearWebhook").addEventListener("click", async () => {
+  const statusEl = $("alertsStatus");
+  const settings = await loadSettings();
+  if (!settings) return setMessage(statusEl, "Save server settings first.", false);
+  try {
+    const api = createApi(settings);
+    const updated = await api.updateServerSettings({ discordWebhookUrl: "" });
+    applyServerSettingsToForm(updated);
+    setMessage(statusEl, "Discord webhook cleared.");
+  } catch (err) {
+    setMessage(statusEl, (err as Error).message, false);
+  }
+});
+
+$("testDiscord").addEventListener("click", async () => {
+  const statusEl = $("alertsStatus");
+  const settings = await loadSettings();
+  if (!settings) return setMessage(statusEl, "Save server settings first.", false);
+  const webhookRaw = $<HTMLInputElement>("discordWebhook").value.trim();
+  try {
+    setMessage(statusEl, "Sending test alert…");
+    const api = createApi(settings);
+    await api.sendTestNotification(webhookRaw || undefined);
+    setMessage(statusEl, "Test alert sent to Discord.");
+  } catch (err) {
+    setMessage(statusEl, (err as Error).message, false);
+  }
+});
+
+$("sendDigest").addEventListener("click", async () => {
+  const statusEl = $("alertsStatus");
+  const settings = await loadSettings();
+  if (!settings) return setMessage(statusEl, "Save server settings first.", false);
+  try {
+    setMessage(statusEl, "Sending digest…");
+    const api = createApi(settings);
+    await api.sendDigestNow();
+    setMessage(statusEl, "Daily digest sent to Discord.");
   } catch (err) {
     setMessage(statusEl, (err as Error).message, false);
   }

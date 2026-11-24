@@ -5,6 +5,8 @@ export type RecipientKind = "to" | "cc" | "bcc";
 export type AccountAuthType = "oauth" | "app_password";
 export type OutboxStatus = "queued" | "sending" | "canceling" | "sent" | "canceled" | "failed";
 
+export type RepliedByEntry = { email: string; at: number };
+
 export type Message = {
   id: string;
   sender: string;
@@ -17,8 +19,11 @@ export type Message = {
   gmail_message_id: string | null;
   gmail_thread_id: string | null;
   replied_at: number | null;
+  replied_by: RepliedByEntry[];
   reply_checked_at: number | null;
   followup_dismissed_at: number | null;
+  bounced_at: number | null;
+  bounce_reason: string | null;
 };
 
 export type RecipientToken = {
@@ -86,8 +91,11 @@ create table if not exists messages (
   gmail_message_id text,
   gmail_thread_id text,
   replied_at integer,
+  replied_by text,
   reply_checked_at integer,
-  followup_dismissed_at integer
+  followup_dismissed_at integer,
+  bounced_at integer,
+  bounce_reason text
 );
 create index if not exists messages_gmail_message_id on messages (gmail_message_id);
 create index if not exists messages_gmail_thread_id on messages (gmail_thread_id);
@@ -150,9 +158,28 @@ create table if not exists outbox (
 );
 create index if not exists outbox_due on outbox (status, send_at);
 create index if not exists outbox_account on outbox (account_email, status, send_at);
+
+create table if not exists app_settings (
+  key text primary key,
+  value text not null,
+  updated_at integer not null
+);
+
+create table if not exists notification_log (
+  id integer primary key autoincrement,
+  kind text not null,
+  dedupe_key text not null unique,
+  sent_at integer not null
+);
+create index if not exists notification_log_sent on notification_log (sent_at);
 `;
 
-type MessageRow = Omit<Message, "recipients"> & { recipients: string };
+type MessageRow = Omit<Message, "recipients" | "replied_by"> & {
+  recipients: string;
+  replied_by?: string | null;
+  bounced_at?: number | null;
+  bounce_reason?: string | null;
+};
 type HitRow = Omit<Hit, "headers"> & { headers: string };
 type OutboxRow = Omit<OutboxItem, "is_scheduled" | "recipients" | "payload_encrypted" | "client_request_id"> & {
   is_scheduled: number;
@@ -161,12 +188,29 @@ type OutboxRow = Omit<OutboxItem, "is_scheduled" | "recipients" | "payload_encry
   client_request_id?: string | null;
 };
 
+function parseRepliedBy(raw: string | null | undefined): RepliedByEntry[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (x): x is RepliedByEntry =>
+        Boolean(x) && typeof x.email === "string" && typeof x.at === "number" && Number.isFinite(x.at),
+    );
+  } catch {
+    return [];
+  }
+}
+
 const rowToMessage = (r: MessageRow): Message => ({
   ...r,
   tracking_mode: r.tracking_mode ?? "legacy",
   replied_at: r.replied_at ?? null,
+  replied_by: parseRepliedBy(r.replied_by),
   reply_checked_at: r.reply_checked_at ?? null,
   followup_dismissed_at: r.followup_dismissed_at ?? null,
+  bounced_at: r.bounced_at ?? null,
+  bounce_reason: r.bounce_reason ?? null,
   recipients: JSON.parse(r.recipients),
 });
 const rowToHit = (r: HitRow): Hit => ({
@@ -220,6 +264,15 @@ export function openDb(path: string) {
   if (!hasColumn(db, "messages", "followup_dismissed_at")) {
     db.exec(`alter table messages add column followup_dismissed_at integer`);
   }
+  if (!hasColumn(db, "messages", "replied_by")) {
+    db.exec(`alter table messages add column replied_by text`);
+  }
+  if (!hasColumn(db, "messages", "bounced_at")) {
+    db.exec(`alter table messages add column bounced_at integer`);
+  }
+  if (!hasColumn(db, "messages", "bounce_reason")) {
+    db.exec(`alter table messages add column bounce_reason text`);
+  }
   if (!hasColumn(db, "hits", "recipient_token")) {
     db.exec(`alter table hits add column recipient_token text`);
   }
@@ -266,7 +319,13 @@ export function openDb(path: string) {
   const deleteMessage = db.prepare(`delete from messages where id = ?`);
   const deleteTokensForMessage = db.prepare(`delete from recipient_tokens where message_id = ?`);
   const updateReplyCheckedStmt = db.prepare(
-    `update messages set replied_at = coalesce(replied_at, ?), reply_checked_at = ? where id = ?`,
+    `update messages set
+       replied_at = coalesce(replied_at, ?),
+       replied_by = coalesce(?, replied_by),
+       bounced_at = coalesce(bounced_at, ?),
+       bounce_reason = coalesce(bounce_reason, ?),
+       reply_checked_at = ?
+     where id = ?`,
   );
   const setFollowupDismissedStmt = db.prepare(
     `update messages set followup_dismissed_at = ? where id = ?`,
@@ -282,13 +341,29 @@ export function openDb(path: string) {
   );
   const selectToken = db.prepare(`select * from recipient_tokens where token = ?`);
   const selectTokensByMessage = db.prepare(`select * from recipient_tokens where message_id = ? order by rowid`);
+  const selectAllTokens = db.prepare(`select * from recipient_tokens order by rowid`);
 
   const insertHit = db.prepare(
     `insert into hits (message_id, recipient_token, at, ip, user_agent, headers) values (?, ?, ?, ?, ?, ?)`,
   );
   const selectHits = db.prepare(`select * from hits where message_id = ? order by at`);
+  const selectAllHits = db.prepare(`select * from hits order by at`);
   const insertView = db.prepare(`insert into message_views (gmail_message_id, at) values (?, ?)`);
   const selectViews = db.prepare(`select at from message_views where gmail_message_id = ? order by at`);
+  const selectAllViews = db.prepare(`select gmail_message_id, at from message_views order by at`);
+
+  const upsertSettingStmt = db.prepare(
+    `insert into app_settings (key, value, updated_at) values (?, ?, ?)
+     on conflict(key) do update set value = excluded.value, updated_at = excluded.updated_at`,
+  );
+  const selectSettingStmt = db.prepare(`select value from app_settings where key = ?`);
+  const selectAllSettingsStmt = db.prepare(`select key, value from app_settings`);
+  const deleteSettingStmt = db.prepare(`delete from app_settings where key = ?`);
+
+  const selectNotificationStmt = db.prepare(`select 1 as ok from notification_log where dedupe_key = ?`);
+  const insertNotificationStmt = db.prepare(
+    `insert or ignore into notification_log (kind, dedupe_key, sent_at) values (?, ?, ?)`,
+  );
   const selectByGmailMessageIds = (n: number) =>
     db.prepare(`select * from messages where gmail_message_id in (${Array(n).fill("?").join(",")})`);
   const selectByGmailThreadIds = (n: number) =>
@@ -425,8 +500,8 @@ export function openDb(path: string) {
         "gmail_thread_id is not null",
         "sent_at is not null",
         "sent_at >= ?",
-        "replied_at is null",
         "followup_dismissed_at is null",
+        "((replied_at is null and bounced_at is null) or (json_array_length(recipients) > 1 and (replied_by is null or json_array_length(replied_by) < json_array_length(recipients))))",
         "(reply_checked_at is null or reply_checked_at <= ?)",
       ];
       const params: (string | number)[] = [opts.sinceMs, opts.staleBeforeMs];
@@ -443,8 +518,36 @@ export function openDb(path: string) {
         .all(...params) as MessageRow[];
       return rows.map(rowToMessage);
     },
-    markReplyChecked(id: string, repliedAt: number | null, checkedAt = Date.now()) {
-      updateReplyCheckedStmt.run(repliedAt, checkedAt, id);
+    markReplyChecked(
+      id: string,
+      repliedAt: number | null,
+      checkedAt = Date.now(),
+      extra?: { repliedBy?: RepliedByEntry[]; bouncedAt?: number | null; bounceReason?: string | null },
+    ) {
+      let repliedByJson: string | null = null;
+      if (extra?.repliedBy && extra.repliedBy.length > 0) {
+        const existing = selectMessage.get(id) as MessageRow | undefined;
+        const merged = new Map<string, number>();
+        for (const entry of parseRepliedBy(existing?.replied_by)) {
+          merged.set(entry.email.toLowerCase(), entry.at);
+        }
+        for (const entry of extra.repliedBy) {
+          const email = entry.email.toLowerCase();
+          const prev = merged.get(email);
+          if (prev === undefined || entry.at < prev) merged.set(email, entry.at);
+        }
+        repliedByJson = JSON.stringify(
+          [...merged.entries()].map(([email, at]) => ({ email, at })).sort((a, b) => a.at - b.at),
+        );
+      }
+      updateReplyCheckedStmt.run(
+        repliedAt,
+        repliedByJson,
+        extra?.bouncedAt ?? null,
+        extra?.bounceReason ?? null,
+        checkedAt,
+        id,
+      );
     },
     setFollowupDismissed(id: string, dismissedAt: number | null) {
       return setFollowupDismissedStmt.run(dismissedAt, id).changes > 0;
@@ -464,6 +567,9 @@ export function openDb(path: string) {
     listRecipientTokens(messageId: string) {
       return (selectTokensByMessage.all(messageId) as RecipientToken[]).map(rowToToken);
     },
+    listAllRecipientTokens() {
+      return (selectAllTokens.all() as RecipientToken[]).map(rowToToken);
+    },
     recordHit(h: Omit<Hit, "id" | "at" | "recipient_token"> & { recipient_token?: string | null; at?: number }) {
       insertHit.run(
         h.message_id,
@@ -477,11 +583,44 @@ export function openDb(path: string) {
     listHits(messageId: string) {
       return (selectHits.all(messageId) as HitRow[]).map(rowToHit);
     },
+    listAllHits() {
+      return (selectAllHits.all() as HitRow[]).map(rowToHit);
+    },
     recordView(gmailMessageId: string) {
       insertView.run(gmailMessageId, Date.now());
     },
     listViews(gmailMessageId: string) {
       return (selectViews.all(gmailMessageId) as { at: number }[]).map((r) => r.at);
+    },
+    listAllViews() {
+      return selectAllViews.all() as { gmail_message_id: string; at: number }[];
+    },
+
+    // App settings
+    getSetting(key: string): string | null {
+      const row = selectSettingStmt.get(key) as { value: string } | undefined;
+      return row ? row.value : null;
+    },
+    setSetting(key: string, value: string) {
+      upsertSettingStmt.run(key, value, Date.now());
+    },
+    deleteSetting(key: string) {
+      deleteSettingStmt.run(key);
+    },
+    listSettings(): Record<string, string> {
+      const out: Record<string, string> = {};
+      for (const row of selectAllSettingsStmt.all() as { key: string; value: string }[]) {
+        out[row.key] = row.value;
+      }
+      return out;
+    },
+
+    // Notification deduplication log
+    hasNotification(dedupeKey: string): boolean {
+      return Boolean(selectNotificationStmt.get(dedupeKey));
+    },
+    recordNotification(kind: string, dedupeKey: string, sentAt = Date.now()): boolean {
+      return insertNotificationStmt.run(kind, dedupeKey, sentAt).changes > 0;
     },
     findByGmailMessageIds(ids: string[]) {
       return ids.length ? (selectByGmailMessageIds(ids.length).all(...ids) as MessageRow[]).map(rowToMessage) : [];

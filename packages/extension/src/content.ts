@@ -659,11 +659,14 @@ async function main() {
               try {
                 showButter({ text: "Checking Gmail threads for replies…" });
                 const res = await api.refreshFollowups(me);
+                const parts: string[] = [];
+                if (res.replied > 0) parts.push(`${res.replied} new ${res.replied === 1 ? "reply" : "replies"}`);
+                if (res.bounced && res.bounced > 0) parts.push(`${res.bounced} ${res.bounced === 1 ? "bounce" : "bounces"}`);
                 showButter({
                   text:
-                    res.replied > 0
-                      ? `Found ${res.replied} new ${res.replied === 1 ? "reply" : "replies"} across ${res.checked} checked threads.`
-                      : `Checked ${res.checked} threads. No new replies yet.`,
+                    parts.length > 0
+                      ? `Found ${parts.join(" and ")} across ${res.checked} checked threads.`
+                      : `Checked ${res.checked} threads. No new replies or bounces yet.`,
                 });
                 await render();
               } catch (err) {

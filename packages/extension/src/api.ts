@@ -3,11 +3,14 @@ import type { Settings } from "./settings.js";
 export type Registration = { id: string; sender: string; recipients: string[]; subject: string };
 export type Late = { kind: "after_send" | "after_previous"; days: number } | null;
 
+export type OpenEvent = { at: number; client: string | null };
+
 export type OpenSummary = {
   opens: number;
   firstOpenAt: number | null;
   lastOpenAt: number | null;
   openAts: number[];
+  openEvents?: OpenEvent[];
   late: Late;
   appleMpp?: number;
   firstAppleMppAt?: number | null;
@@ -24,6 +27,7 @@ export type RecipientOpenSummary = {
   firstOpenAt: number | null;
   lastOpenAt: number | null;
   openAts: number[];
+  openEvents?: OpenEvent[];
   late: Late;
   appleMpp?: number;
   firstAppleMppAt?: number | null;
@@ -40,6 +44,25 @@ export type TrackedMessage = OpenSummary & {
   created_at: number;
   replied_at?: number | null;
   followup_dismissed_at?: number | null;
+  bounced_at?: number | null;
+  bounce_reason?: string | null;
+};
+
+export type ServerSettings = {
+  discordWebhookConfigured: boolean;
+  discordWebhookMasked: string | null;
+  notifyFirstOpen: boolean;
+  notifyHotSpike: boolean;
+  notifyRevival: boolean;
+  notifyBounce: boolean;
+  digestEnabled: boolean;
+  digestHour: number;
+  digestTimezone: string;
+  ignoredIps: string[];
+};
+
+export type ServerSettingsPatch = Partial<Omit<ServerSettings, "discordWebhookConfigured" | "discordWebhookMasked">> & {
+  discordWebhookUrl?: string;
 };
 
 export type ThreadSummary = {
@@ -210,8 +233,17 @@ export function createApi(settings: Pick<Settings, "serverUrl" | "apiKey">) {
     // Follow-up & reply checks
     dismissFollowup: (id: string, dismissed = true) =>
       call(`/messages/${encodeURIComponent(id)}/dismiss-followup`, "POST", { dismissed }),
-    refreshFollowups: async (sender: string): Promise<{ checked: number; replied: number }> =>
+    refreshFollowups: async (sender: string): Promise<{ checked: number; replied: number; bounced?: number }> =>
       (await call("/followups/refresh", "POST", { sender, force: true })).json(),
+
+    // Server settings & Discord notifications
+    getServerSettings: async (): Promise<ServerSettings> => (await call("/settings", "GET")).json(),
+    updateServerSettings: async (patch: ServerSettingsPatch): Promise<ServerSettings> =>
+      (await call("/settings", "PATCH", patch)).json(),
+    sendTestNotification: async (discordWebhookUrl?: string): Promise<{ ok: boolean }> =>
+      (await call("/notifications/test", "POST", discordWebhookUrl ? { discordWebhookUrl } : {})).json(),
+    sendDigestNow: async (): Promise<{ ok: boolean }> =>
+      (await call("/notifications/digest", "POST", {})).json(),
   };
 }
 
@@ -233,6 +265,8 @@ export function createStatusBatcher(api: ReturnType<typeof createApi>, delayMs =
       t.forEach((cbs, id) => cbs.forEach((cb) => cb(status.threads[id])));
     } catch (err) {
       console.log("[open-mailtrack]", err);
+      m.forEach((cbs) => cbs.forEach((cb) => cb(undefined)));
+      t.forEach((cbs) => cbs.forEach((cb) => cb(undefined)));
     }
   }
   const schedule = () => (timer ??= setTimeout(flush, delayMs));

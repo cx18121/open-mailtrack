@@ -645,7 +645,7 @@ describe("unified outbox, per-recipient tracking, Apple MPP, and contacts", () =
         body: JSON.stringify({ sender: "me@cornell.edu", force: true }),
       })
     ).json();
-    expect(check1).toEqual({ checked: 1, replied: 0 });
+    expect(check1).toEqual({ checked: 1, replied: 0, bounced: 0 });
     expect(db.getMessage(sent.messageId)!.replied_at).toBeNull();
 
     // Simulate external reply arriving in the thread
@@ -658,7 +658,7 @@ describe("unified outbox, per-recipient tracking, Apple MPP, and contacts", () =
         body: JSON.stringify({ sender: "me@cornell.edu", force: true }),
       })
     ).json();
-    expect(check2).toEqual({ checked: 1, replied: 1 });
+    expect(check2).toEqual({ checked: 1, replied: 1, bounced: 0 });
     expect(db.getMessage(sent.messageId)!.replied_at).toBe(replyTs);
 
     // Dismiss follow-up works and persists

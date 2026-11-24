@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { classifyHit, summarize } from "./classify.js";
+import { AppleRelayMatcher } from "./apple-mpp.js";
+import { classifyHit, describeClient, extractOpenEvents, summarize } from "./classify.js";
 
 const PROXY = "Mozilla/5.0 (Windows NT 5.1; rv:11.0) Gecko Firefox/11.0 (via ggpht.com GoogleImageProxy)";
 const PREFETCH = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/42.0.2311.135 Safari/537.36 Edge/12.246 Mozilla/5.0";
@@ -96,6 +97,60 @@ describe("classifyHit", () => {
     expect(
       classifyHit({ at: 5000, ip: "1.2.3.4", user_agent: "Mozilla/5.0" }, [], undefined, { isAppleRelayIp }).kind,
     ).toBe("open");
+  });
+
+  it("excludes security scanners and link preview bots", () => {
+    for (const ua of [
+      "Slackbot-LinkExpanding 1.0 (+https://api.slack.com/robots)",
+      "Mozilla/5.0 (compatible; Proofpoint/1.0)",
+      "Mimecast Security Scanner",
+      "curl/8.4.0",
+      "Mozilla/5.0 HeadlessChrome/120.0.0.0",
+      "Microsoft Office Existence Discovery",
+    ]) {
+      expect(classifyHit({ at: 5000, user_agent: ua }, []).kind, ua).toBe("bot");
+    }
+  });
+
+  it("excludes hits matching configured ignored IPs and CIDRs", () => {
+    const matcher = AppleRelayMatcher.fromEntries(["203.0.113.4", "198.51.100.0/24", "2001:db8::1"]);
+    const opts = { isIgnoredIp: (ip: string | null | undefined) => matcher.has(ip) };
+    expect(classifyHit({ at: 5000, ip: "203.0.113.4", user_agent: "Mozilla/5.0 (iPhone)" }, [], undefined, opts).kind).toBe("ignored");
+    expect(classifyHit({ at: 5000, ip: "198.51.100.42", user_agent: "Mozilla/5.0 (Macintosh)" }, [], undefined, opts).kind).toBe("ignored");
+    expect(classifyHit({ at: 5000, ip: "2001:db8::1", user_agent: "Mozilla/5.0 (Windows)" }, [], undefined, opts).kind).toBe("ignored");
+    expect(classifyHit({ at: 5000, ip: "8.8.8.8", user_agent: "Mozilla/5.0 (iPhone)" }, [], undefined, opts).kind).toBe("open");
+  });
+
+  it("suppresses GoogleImageProxy hits after recipient reply to prevent mobile Gmail quoted-pixel self-opens", () => {
+    const replyAt = 100_000;
+    expect(classifyHit(hit(replyAt - 1), [], undefined, { repliedAt: replyAt }).kind).toBe("open");
+    expect(classifyHit(hit(replyAt), [], undefined, { repliedAt: replyAt }).kind).toBe("post_reply");
+    expect(classifyHit(hit(replyAt + 60_000), [], undefined, { repliedAt: replyAt }).kind).toBe("post_reply");
+    // Direct non-Google-proxy opens after reply still count
+    expect(
+      classifyHit({ at: replyAt + 60_000, user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)" }, [], undefined, { repliedAt: replyAt }).kind,
+    ).toBe("open");
+  });
+});
+
+describe("describeClient and extractOpenEvents", () => {
+  it("parses honest client hints and deduplicates open events", () => {
+    expect(describeClient(PROXY, "open")).toBe("Gmail");
+    expect(describeClient("Mozilla/5.0", "apple_mpp")).toBe("Apple Mail (privacy proxy)");
+    expect(describeClient("Outlook-iOS/711.2442958", "open")).toBe("Outlook (iOS)");
+    expect(describeClient("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0)", "open")).toBe("iPhone");
+    expect(describeClient("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)", "open")).toBe("macOS");
+
+    const events = extractOpenEvents([
+      { at: 1000, kind: "open", reason: "", client: "Gmail" },
+      { at: 1500, kind: "open", reason: "", client: "Gmail" },
+      { at: 20_000, kind: "post_reply", reason: "", client: "Gmail" },
+      { at: 30_000, kind: "open", reason: "", client: "iPhone" },
+    ]);
+    expect(events).toEqual([
+      { at: 1000, client: "Gmail" },
+      { at: 30_000, client: "iPhone" },
+    ]);
   });
 });
 
