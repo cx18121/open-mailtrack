@@ -13,6 +13,7 @@ export type ReplyCheckerOptions = {
   staleMs?: number;
   intervalMs?: number;
   onBounce?: (args: { message: Message; bouncedAt: number; reason: string | null }) => void;
+  onReply?: (args: { sender: string; threadId: string; repliedAt: number; repliedBy: string[] }) => void;
 };
 
 export function createReplyChecker(opts: ReplyCheckerOptions) {
@@ -42,7 +43,8 @@ export function createReplyChecker(opts: ReplyCheckerOptions) {
         staleBeforeMs: params.force ? now : now - staleMs,
         limit: params.limit ?? 30,
       });
-      if (candidates.length === 0) return { checked: 0, replied: 0, bounced: 0 };
+      const conditionalOutbox = db.listCancelOnReplyOutbox({ accountEmail: params.sender });
+      if (candidates.length === 0 && conditionalOutbox.length === 0) return { checked: 0, replied: 0, bounced: 0 };
 
       // Group by (sender, gmail_thread_id) so we only call Gmail once per thread.
       const bySenderThread = new Map<string, Message[]>();
@@ -54,13 +56,17 @@ export function createReplyChecker(opts: ReplyCheckerOptions) {
       }
 
       const transports = new Map<string, ReturnType<typeof getTransport> | null>();
-      for (const [, msgs] of bySenderThread) {
-        const sender = msgs[0].sender.toLowerCase();
+      const transportFor = (sender: string) => {
         if (!transports.has(sender)) {
           const account = db.getAccount(sender);
           transports.set(sender, account ? getTransport(account) : null);
         }
-        const transport = transports.get(sender);
+        return transports.get(sender) ?? null;
+      };
+
+      for (const [, msgs] of bySenderThread) {
+        const sender = msgs[0].sender.toLowerCase();
+        const transport = transportFor(sender);
         if (!transport?.inspectThreadActivity && !transport?.getThreadReplyAt) continue;
 
         const threadId = msgs[0].gmail_thread_id!;
@@ -120,6 +126,55 @@ export function createReplyChecker(opts: ReplyCheckerOptions) {
           console.error(`[open-mailtrack] reply check failed for thread ${threadId}:`, err);
         }
       }
+
+      // Also check queued cancel-on-reply scheduled follow-ups, grouped by (sender, threadId).
+      if (opts.onReply && conditionalOutbox.length > 0) {
+        const grouped = new Map<string, typeof conditionalOutbox>();
+        for (const item of conditionalOutbox) {
+          if (!item.thread_id) continue;
+          const key = `${item.account_email.toLowerCase()}::${item.thread_id}`;
+          const list = grouped.get(key) ?? [];
+          list.push(item);
+          grouped.set(key, list);
+        }
+
+        for (const [, items] of grouped) {
+          const sender = items[0].account_email.toLowerCase();
+          const threadId = items[0].thread_id!;
+          const transport = transportFor(sender);
+          if (!transport?.inspectThreadActivity && !transport?.getThreadReplyAt) continue;
+          const latestCreated = Math.max(...items.map((i) => i.created_at));
+          const earliestCreated = Math.min(...items.map((i) => i.created_at));
+          try {
+            let replyAt: number | null = null;
+            let repliedBy: string[] = [];
+            if (transport.inspectThreadActivity) {
+              const activity = await transport.inspectThreadActivity(threadId, earliestCreated, sender);
+              const latestReply = activity.repliedBy.reduce((max, r) => (r.at > max ? r.at : max), activity.repliedAt ?? 0);
+              if (latestReply > 0) {
+                replyAt = latestReply;
+                repliedBy = activity.repliedBy.map((r) => r.email);
+              }
+              // If multiple items exist with different created_at and earliest reply predates latestCreated, check after latestCreated too.
+              if (items.length > 1 && latestCreated > earliestCreated && (!replyAt || replyAt <= latestCreated)) {
+                const newer = await transport.inspectThreadActivity(threadId, latestCreated, sender);
+                if (newer.repliedAt !== null) {
+                  replyAt = newer.repliedAt;
+                  repliedBy = newer.repliedBy.map((r) => r.email);
+                }
+              }
+            } else if (transport.getThreadReplyAt) {
+              replyAt = await transport.getThreadReplyAt(threadId, earliestCreated, sender);
+            }
+            if (replyAt !== null && replyAt > earliestCreated) {
+              opts.onReply({ sender, threadId, repliedAt: replyAt, repliedBy });
+            }
+          } catch (err) {
+            console.error(`[open-mailtrack] conditional follow-up reply check failed for thread ${threadId}:`, err);
+          }
+        }
+      }
+
       return { checked, replied, bounced };
     } finally {
       running = false;

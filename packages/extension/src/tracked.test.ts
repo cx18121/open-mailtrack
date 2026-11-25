@@ -373,4 +373,47 @@ describe("trackedList", () => {
     expect(m).toBeUndefined();
     expect(t).toBeUndefined();
   });
+
+  it("shows Cancels on reply pill in scheduledList only for conditional follow-ups", () => {
+    const el = scheduledList(
+      document,
+      [
+        {
+          id: "o1",
+          accountEmail: "me@x.com",
+          messageId: "m1",
+          status: "queued",
+          sendAt: now + 3_600_000,
+          isScheduled: true,
+          cancelOnReply: true,
+          subject: "Conditional bump",
+          recipients: { to: ["alice@x.com"], cc: [], bcc: [] },
+          threadId: "t1",
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          id: "o2",
+          accountEmail: "me@x.com",
+          messageId: "m2",
+          status: "queued",
+          sendAt: now + 7_200_000,
+          isScheduled: true,
+          cancelOnReply: false,
+          subject: "Normal scheduled",
+          recipients: { to: ["bob@x.com"], cc: [], bcc: [] },
+          threadId: null,
+          error: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      { onSendNow: () => {}, onReschedule: () => {}, onCancel: () => {} },
+      now,
+    );
+    const pills = el.querySelectorAll(".omt-conditional-pill");
+    expect(pills).toHaveLength(1);
+    expect(pills[0].textContent).toBe("Cancels on reply");
+  });
 });

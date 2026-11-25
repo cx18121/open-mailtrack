@@ -109,6 +109,7 @@ export type OutboxEnqueueRequest = {
   sendAt?: number;
   undoDelayMs?: number;
   isScheduled?: boolean;
+  cancelOnReply?: boolean;
 };
 
 export type OutboxEnqueueResponse = {
@@ -116,7 +117,7 @@ export type OutboxEnqueueResponse = {
   messageId: string;
   sendAt: number;
   remainingMs?: number;
-  status: "queued" | "sent";
+  status: "queued" | "sent" | "canceled";
 };
 
 export type OutboxItem = {
@@ -126,6 +127,7 @@ export type OutboxItem = {
   status: "queued" | "sending" | "sent" | "canceled" | "failed";
   sendAt: number;
   isScheduled: boolean;
+  cancelOnReply?: boolean;
   subject: string;
   recipients: { to: string[]; cc: string[]; bcc: string[] };
   threadId: string | null;

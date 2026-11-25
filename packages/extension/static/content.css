@@ -608,6 +608,24 @@
   font-size: 11px;
   line-height: 18px;
 }
+.omt-conditional-pill {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 4px;
+  background: #e8f0fe;
+  color: #1967d2;
+  font-size: 11px;
+  line-height: 18px;
+}
+.omt-schedule-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  font-size: 13px;
+  color: #1f1f1f;
+  cursor: pointer;
+}
 .omt-followup-refresh {
   margin-left: auto;
   height: 32px;

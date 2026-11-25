@@ -198,7 +198,12 @@ async function main() {
       })),
     );
 
-    async function dispatchViaOutbox(opts: { sendAt?: number; isScheduled?: boolean; undoDelayMs?: number }) {
+    async function dispatchViaOutbox(opts: {
+      sendAt?: number;
+      isScheduled?: boolean;
+      undoDelayMs?: number;
+      cancelOnReply?: boolean;
+    }) {
       if (sending) return;
       const { to, cc, bcc, externalCount } = uniqueExternalRecipients(compose, me);
       if (externalCount === 0) return;
@@ -268,6 +273,7 @@ async function main() {
           sendAt: opts.sendAt,
           isScheduled: opts.isScheduled,
           undoDelayMs: opts.undoDelayMs,
+          cancelOnReply: opts.cancelOnReply,
         });
 
         clientRequestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
@@ -297,8 +303,9 @@ async function main() {
 
         const undoTimeMs = res.remainingMs ?? (opts.undoDelayMs ?? 0);
         if (opts.isScheduled && opts.sendAt) {
+          const suffix = opts.cancelOnReply ? " (cancels if they reply)" : "";
           showButter({
-            text: `Scheduled for ${when(opts.sendAt, Date.now())}`,
+            text: `Scheduled for ${when(opts.sendAt, Date.now())}${suffix}`,
             time: 8000,
             buttons: [
               { title: "View scheduled", onClick: () => openTracked({ section: "scheduled" }) },
@@ -352,6 +359,20 @@ async function main() {
       const box = doc.createElement("div");
       box.className = "omt-schedule-modal";
 
+      const isReplyThread = Boolean(compose.isReply?.() && compose.getThreadID?.());
+      let cancelOnReplyInput: HTMLInputElement | null = null;
+      if (isReplyThread) {
+        const checkWrap = doc.createElement("label");
+        checkWrap.className = "omt-schedule-check";
+        cancelOnReplyInput = doc.createElement("input");
+        cancelOnReplyInput.type = "checkbox";
+        cancelOnReplyInput.checked = false;
+        const checkText = doc.createElement("span");
+        checkText.textContent = "Cancel automatically if they reply";
+        checkWrap.append(cancelOnReplyInput, checkText);
+        box.append(checkWrap);
+      }
+
       const presetsWrap = doc.createElement("div");
       presetsWrap.className = "omt-schedule-presets";
       let modal: InboxSDK.ModalView | null = null;
@@ -367,8 +388,9 @@ async function main() {
         timeEl.textContent = when(preset.sendAt, Date.now());
         btn.append(label, timeEl);
         btn.addEventListener("click", () => {
+          const cancelOnReply = Boolean(cancelOnReplyInput?.checked);
           modal?.close();
-          void dispatchViaOutbox({ sendAt: preset.sendAt, isScheduled: true });
+          void dispatchViaOutbox({ sendAt: preset.sendAt, isScheduled: true, cancelOnReply });
         });
         presetsWrap.append(btn);
       }
@@ -394,8 +416,9 @@ async function main() {
                 showButter({ text: "Pick a future date and time." });
                 return;
               }
+              const cancelOnReply = Boolean(cancelOnReplyInput?.checked);
               modal?.close();
-              void dispatchViaOutbox({ sendAt, isScheduled: true });
+              void dispatchViaOutbox({ sendAt, isScheduled: true, cancelOnReply });
             },
           },
           {

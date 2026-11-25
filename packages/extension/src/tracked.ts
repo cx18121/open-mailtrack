@@ -607,7 +607,15 @@ export function scheduledList(doc: Document, items: OutboxItem[], actions: Sched
       btns.append(sendNow, picker, cancel);
     }
 
-    top.append(to, subject, whenEl, btns);
+    top.append(to, subject);
+    if (item.cancelOnReply) {
+      const condPill = doc.createElement("span");
+      condPill.className = "omt-conditional-pill";
+      condPill.textContent = "Cancels on reply";
+      condPill.title = "Cancels automatically if someone replies in this thread before send time";
+      top.append(condPill);
+    }
+    top.append(whenEl, btns);
     row.append(top);
     list.append(row);
   }

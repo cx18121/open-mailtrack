@@ -97,6 +97,9 @@ describe("classifyDsnMessage and isBounceMessage", () => {
     expect(isBounceMessage({ from: "mailer-daemon@googlemail.com", subject: "Delivery Status Notification (Delay)" }).bounce).toBe(false);
 
     expect(classifyDsnMessage({ from: "Alice <alice@company.com>", subject: "Re: Coffee chat" }).kind).toBe("human");
+    expect(classifyDsnMessage({ from: "Alice <alice@company.com>", autoSubmitted: "auto-replied", subject: "Out of Office" }).kind).toBe("auto_reply");
+    expect(classifyDsnMessage({ from: "Bob <bob@company.com>", xAutoreply: "yes", subject: "Vacation" }).kind).toBe("auto_reply");
+    expect(classifyDsnMessage({ from: "Carol <carol@company.com>", precedence: "auto_reply", subject: "Away" }).kind).toBe("auto_reply");
     expect(isBounceMessage({ from: "Alice <alice@company.com>", autoSubmitted: "auto-replied", subject: "Out of Office" }).bounce).toBe(false);
   });
 });
@@ -542,6 +545,215 @@ describe("Discord alerts, settings, bounce detection, and post-reply filtering",
     expect(d2).toEqual({ sent: false, skipped: "already_sent" });
 
     app.outbox.stop();
+    db.close();
+  });
+
+  it("cancels conditional scheduled follow-ups on live reply check, fails closed on error, sends when no reply, and cancels early in background", async () => {
+    const baseTime = Date.UTC(2026, 4, 10, 12, 0, 0);
+    vi.spyOn(Date, "now").mockReturnValue(baseTime);
+
+    const db = openDb(":memory:");
+    const { calls, fetchImpl } = makeFetchSpy();
+    const smtpSent: string[] = [];
+    let throwOnInspect = false;
+    const threadReplies = new Map<string, { email: string; at: number }[]>();
+
+    const transport: MailboxTransport = {
+      ...makeFakeTransport(),
+      async sendSmtpCopy(_from, to) {
+        smtpSent.push(to);
+      },
+      async inspectThreadActivity(threadId, sentAt) {
+        if (throwOnInspect) throw new Error("Gmail API temporarily unavailable");
+        const hits = (threadReplies.get(threadId) ?? []).filter((r) => r.at > sentAt);
+        return {
+          repliedAt: hits.length > 0 ? hits[0].at : null,
+          repliedBy: hits,
+          bouncedAt: null,
+          bounceReason: null,
+        };
+      },
+    };
+
+    const app = createApp(db, {
+      apiKey: API_KEY,
+      publicUrl: "https://t.example.com",
+      discordWebhookUrl: WEBHOOK,
+      fetchImpl,
+      transportFactory: () => transport,
+    });
+
+    await app.request("/api/accounts/app-password", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ email: "me@example.com", appPassword: "abcd efgh ijkl mnop", skipVerify: true }),
+    });
+
+    // 1. Rejects cancelOnReply without a threadId
+    const bad = await app.request("/api/outbox", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        sender: "me@example.com",
+        to: ["alice@company.com"],
+        subject: "New email",
+        html: "<p>Hi</p>",
+        sendAt: baseTime + 3_600_000,
+        isScheduled: true,
+        cancelOnReply: true,
+      }),
+    });
+    expect(bad.status).toBe(400);
+
+    // 2. Schedule follow-up on thread t_reply (which already had an OLDER reply before scheduling)
+    threadReplies.set("t_reply", [{ email: "alice@company.com", at: baseTime - 60_000 }]);
+    const sched1 = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@example.com",
+          to: ["alice@company.com"],
+          subject: "Re: Coffee",
+          html: "<p>Bumping this</p>",
+          threadId: "t_reply",
+          sendAt: baseTime + 3_600_000,
+          isScheduled: true,
+          cancelOnReply: true,
+        }),
+      })
+    ).json();
+
+    const list1 = await (await app.request("/api/outbox?sender=me@example.com", { headers: auth })).json();
+    expect(list1.items[0].cancelOnReply).toBe(true);
+
+    // 3. Earlier reply before scheduling does NOT cancel it; when Gmail fails during live check, it fails closed (no SMTP send)
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 3_600_000);
+    throwOnInspect = true;
+    await app.outbox.drainDue();
+    expect(smtpSent).toHaveLength(0);
+    expect(db.getOutbox(sched1.outboxId)!.status).toBe("failed");
+
+    // 4. Re-queue and allow Gmail check: older reply before created_at is ignored, so follow-up sends normally!
+    throwOnInspect = false;
+    await app.outbox.reschedule(sched1.outboxId, baseTime + 3_600_000);
+    await app.outbox.drainDue();
+    expect(smtpSent).toEqual(["alice@company.com"]);
+    expect(db.getOutbox(sched1.outboxId)!.status).toBe("sent");
+
+    // 5. Schedule follow-up on thread t_live; a new reply arrives right before due time -> live check cancels & alerts Discord
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 4_000_000);
+    const sched2 = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@example.com",
+          to: ["bob@company.com"],
+          subject: "Re: Proposal",
+          html: "<p>Checking in</p>",
+          threadId: "t_live",
+          sendAt: baseTime + 5_000_000,
+          isScheduled: true,
+          cancelOnReply: true,
+        }),
+      })
+    ).json();
+    threadReplies.set("t_live", [{ email: "bob@company.com", at: baseTime + 4_995_000 }]);
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 5_000_000);
+    await app.outbox.drainDue();
+    expect(smtpSent).toEqual(["alice@company.com"]); // bob NOT sent!
+    expect(db.getOutbox(sched2.outboxId)!.status).toBe("canceled");
+    expect(db.getMessage(sched2.messageId)).toBeNull();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls.some((c) => c.payload.embeds[0].title === "Canceled follow-up (reply received): Re: Proposal")).toBe(true);
+
+    // 6. Early background cancellation via replyChecker even on an untracked thread
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 6_000_000);
+    const sched3 = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@example.com",
+          to: ["carol@company.com"],
+          subject: "Re: Untracked intro",
+          html: "<p>Following up</p>",
+          threadId: "t_untracked",
+          sendAt: baseTime + 9_000_000,
+          isScheduled: true,
+          cancelOnReply: true,
+        }),
+      })
+    ).json();
+    threadReplies.set("t_untracked", [{ email: "carol@company.com", at: baseTime + 6_500_000 }]);
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 6_600_000);
+    await app.replyChecker.check({ sender: "me@example.com", force: true });
+    expect(db.getOutbox(sched3.outboxId)!.status).toBe("canceled");
+    expect(db.getMessage(sched3.messageId)).toBeNull();
+    await new Promise((r) => setTimeout(r, 10));
+    expect(calls.some((c) => c.payload.embeds[0].title === "Canceled follow-up (reply received): Re: Untracked intro")).toBe(true);
+
+    // 7. Race & partial-delivery safety: claimed `sending` items and partially-delivered items are never auto-canceled
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 10_000_000);
+    const sched4 = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@example.com",
+          to: ["dave@company.com", "erin@company.com"],
+          subject: "Re: Group follow-up",
+          html: "<p>Checking in</p>",
+          threadId: "t_partial",
+          sendAt: baseTime + 11_000_000,
+          isScheduled: true,
+          cancelOnReply: true,
+        }),
+      })
+    ).json();
+    // Simulate Dave already delivered (partial delivery) + reply arriving before retry
+    const firstTok = db.listRecipientTokens(sched4.messageId)[0];
+    db.markRecipientTokenSent(firstTok.token, "<sent1@example.com>", baseTime + 10_100_000);
+    threadReplies.set("t_partial", [{ email: "dave@company.com", at: baseTime + 10_200_000 }]);
+    expect(
+      app.outbox.cancelQueuedForThreadReply({
+        accountEmail: "me@example.com",
+        threadId: "t_partial",
+        repliedAt: baseTime + 10_200_000,
+        repliedBy: ["dave@company.com"],
+      }),
+    ).toBe(0);
+    expect(db.getOutbox(sched4.outboxId)!.status).toBe("queued");
+
+    // Claiming an item into `sending` blocks background cancelQueuedForThreadReply
+    const sched5 = await (
+      await app.request("/api/outbox", {
+        method: "POST",
+        headers: auth,
+        body: JSON.stringify({
+          sender: "me@example.com",
+          to: ["frank@company.com"],
+          subject: "Re: Claimed",
+          html: "<p>Hi</p>",
+          threadId: "t_race",
+          sendAt: baseTime + 12_000_000,
+          isScheduled: true,
+          cancelOnReply: true,
+        }),
+      })
+    ).json();
+    db.claimOutboxById(sched5.outboxId, baseTime + 12_000_000);
+    expect(
+      app.outbox.cancelQueuedForThreadReply({
+        accountEmail: "me@example.com",
+        threadId: "t_race",
+        repliedAt: baseTime + 12_000_500,
+        repliedBy: ["frank@company.com"],
+      }),
+    ).toBe(0);
+    expect(db.getOutbox(sched5.outboxId)!.status).toBe("sending");
+
     db.close();
   });
 });

@@ -1,5 +1,5 @@
 import type { OpenSummary } from "./classify.js";
-import type { Db, Message } from "./db.js";
+import type { Db, Message, OutboxItem } from "./db.js";
 import type { SettingsStore } from "./settings.js";
 
 const COLOR_OPEN = 0x188038;
@@ -205,6 +205,32 @@ export function createNotifier(opts: NotifierOptions) {
     });
   }
 
+  async function notifyAutoCanceled(args: {
+    item: OutboxItem;
+    repliedAt: number;
+    repliedBy: string[];
+  }): Promise<boolean> {
+    const s = settings.load();
+    if (!s.discordWebhookUrl) return false;
+    const { item, repliedAt, repliedBy } = args;
+    const subject = item.subject || "(no subject)";
+    const recipients = [...item.recipients.to, ...item.recipients.cc, ...item.recipients.bcc];
+    const fields: DiscordEmbedField[] = [
+      { name: "Recipients", value: truncate(recipients.join(", ") || "Unknown", 200), inline: true },
+    ];
+    if (repliedBy.length > 0) {
+      fields.push({ name: "Reply from", value: truncate(repliedBy.join(", "), 200), inline: true });
+    }
+    return sendOnce("auto_cancel", [`auto_cancel:${item.id}`], {
+      title: truncate(`Canceled follow-up (reply received): ${subject}`, 256),
+      url: gmailThreadUrl(item.thread_id),
+      color: COLOR_REVIVAL,
+      fields,
+      footer: { text: item.account_email },
+      timestamp: new Date(repliedAt).toISOString(),
+    });
+  }
+
   function buildDigestEmbed(now: number, dateKey: string): { embed: DiscordEmbed; hasContent: boolean } {
     const all = listDigestMessages();
     const since24h = now - DAY_MS;
@@ -362,6 +388,7 @@ export function createNotifier(opts: NotifierOptions) {
   return {
     notifyOpen,
     notifyBounce,
+    notifyAutoCanceled,
     sendDigest,
     sendTest,
     start() {

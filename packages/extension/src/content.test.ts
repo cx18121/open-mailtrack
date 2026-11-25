@@ -74,7 +74,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}) {
+function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[]; isReply?: boolean; threadId?: string | null } = {}) {
   const events: Record<string, (...args: any[]) => any> = {};
   const body = document.createElement("div");
   body.innerHTML = "<p>Hello group</p>";
@@ -82,6 +82,8 @@ function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}
   const to = (opts.to ?? ["ana@example.com"]).map((emailAddress) => ({ emailAddress }));
   const cc = (opts.cc ?? []).map((emailAddress) => ({ emailAddress }));
   const bcc = (opts.bcc ?? []).map((emailAddress) => ({ emailAddress }));
+  const isReply = opts.isReply ?? true;
+  const threadId = opts.threadId !== undefined ? opts.threadId : "gt1";
 
   mocks.composeHandler.mock.calls[0][0]({
     addButton: vi.fn(),
@@ -96,8 +98,8 @@ function makeCompose(opts: { to?: string[]; cc?: string[]; bcc?: string[] } = {}
     getBodyElement: () => body,
     getHTMLContent: () => body.innerHTML,
     getSubject: () => "Hello",
-    isReply: () => true,
-    getThreadID: () => "gt1",
+    isReply: () => isReply,
+    getThreadID: () => threadId,
     getCurrentDraftID: async () => "draft-123",
     getInitialMessageID: () => "dmsg-orig",
     getMessageID: () => {
@@ -256,5 +258,35 @@ describe("status line", () => {
     expect(body.previousElementSibling?.classList.contains("omt-status")).toBe(true);
     expect(wrapper.querySelector<HTMLUListElement>(".omt-status-list")!.hidden).toBe(false);
     listeners.destroy();
+  });
+});
+
+describe("conditional schedule send", () => {
+  it("shows Cancel automatically if they reply on reply compose windows and hides it on new emails", async () => {
+    await boot(true);
+    let capturedModal: { el: HTMLElement; buttons: { text: string; onClick: () => void }[] } | null = null;
+    mocks.showModalView.mockImplementation((opts) => {
+      capturedModal = opts;
+      return { close: vi.fn() };
+    });
+
+    // Reply compose -> shows checkbox and passes cancelOnReply: true when checked
+    const reply = makeCompose({ isReply: true, threadId: "gt1" });
+    reply.events.scheduleSendMenuOpening({ cancel: vi.fn() });
+    const check = capturedModal!.el.querySelector<HTMLInputElement>('.omt-schedule-check input[type="checkbox"]');
+    expect(check).not.toBeNull();
+    expect(check!.checked).toBe(false);
+    check!.checked = true;
+    capturedModal!.el.querySelector<HTMLButtonElement>(".omt-schedule-preset")!.click();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.enqueueOutbox).toHaveBeenCalledWith(
+      expect.objectContaining({ isScheduled: true, cancelOnReply: true, threadId: "gt1" }),
+    );
+
+    // Brand-new compose -> no checkbox
+    capturedModal = null;
+    const fresh = makeCompose({ isReply: false, threadId: "ephemeral-draft-thread" });
+    fresh.events.scheduleSendMenuOpening({ cancel: vi.fn() });
+    expect(capturedModal!.el.querySelector(".omt-schedule-check")).toBeNull();
   });
 });

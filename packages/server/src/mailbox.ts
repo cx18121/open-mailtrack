@@ -114,16 +114,21 @@ export type MessageHeaderSummary = {
   returnPath?: string;
   failedRecipients?: string;
   contentType?: string;
+  xAutoreply?: string;
+  xAutorespond?: string;
+  precedence?: string;
 };
 
 export type DsnClassification =
   | { kind: "bounce"; reason: string }
   | { kind: "delay"; reason: string }
+  | { kind: "auto_reply"; reason: string }
   | { kind: "human"; reason: null };
 
 /**
  * Classifies whether a thread message is a permanent delivery bounce, a temporary delivery delay
- * warning (such as Gmail's "Delivery Status Notification (Delay)"), or a regular human message.
+ * warning (such as Gmail's "Delivery Status Notification (Delay)"), an out-of-office / vacation
+ * auto-reply (RFC 3834), or a regular human message.
  */
 export function classifyDsnMessage(h: MessageHeaderSummary): DsnClassification {
   const fromEmail = h.from ? extractEmailAddress(h.from) : "";
@@ -135,7 +140,8 @@ export function classifyDsnMessage(h: MessageHeaderSummary): DsnClassification {
   const isDaemonSender = Boolean(localPart && BOUNCE_LOCAL_PARTS.test(localPart));
   const emptyReturnPath = h.returnPath?.trim() === "<>";
   const auto = (h.autoSubmitted ?? "").trim().toLowerCase();
-  const isAutoDsn = emptyReturnPath && Boolean(auto) && auto !== "no" && Boolean(subject && BOUNCE_SUBJECT.test(subject));
+  const isAutoSubmitted = Boolean(auto) && auto !== "no";
+  const isAutoDsn = emptyReturnPath && isAutoSubmitted && Boolean(subject && BOUNCE_SUBJECT.test(subject));
 
   if (isDelaySubject && (isDaemonSender || isDsnReport || isAutoDsn)) {
     return { kind: "delay", reason: subject! };
@@ -151,6 +157,14 @@ export function classifyDsnMessage(h: MessageHeaderSummary): DsnClassification {
   }
   if (isAutoDsn) {
     return { kind: "bounce", reason: subject! };
+  }
+  const hasAutoReplyHeader =
+    isAutoSubmitted ||
+    /^(yes|true|1)$/i.test((h.xAutoreply ?? "").trim()) ||
+    /^(yes|true|1)$/i.test((h.xAutorespond ?? "").trim()) ||
+    /^auto[_-]?reply$/i.test((h.precedence ?? "").trim());
+  if (hasAutoReplyHeader) {
+    return { kind: "auto_reply", reason: subject ?? "Automated reply" };
   }
   return { kind: "human", reason: null };
 }
@@ -242,6 +256,9 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       "Return-Path",
       "X-Failed-Recipients",
       "Content-Type",
+      "X-Autoreply",
+      "X-Autorespond",
+      "Precedence",
     ]
       .map((h) => `metadataHeaders=${encodeURIComponent(h)}`)
       .join("&");
@@ -275,8 +292,11 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
         returnPath: h("return-path"),
         failedRecipients: h("x-failed-recipients"),
         contentType: h("content-type"),
+        xAutoreply: h("x-autoreply"),
+        xAutorespond: h("x-autorespond"),
+        precedence: h("precedence"),
       });
-      if (dsn.kind === "delay") continue;
+      if (dsn.kind === "delay" || dsn.kind === "auto_reply") continue;
       if (dsn.kind === "bounce") {
         if (bouncedAt === null || ts < bouncedAt) {
           bouncedAt = ts;
@@ -575,7 +595,17 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
               envelope: true,
               internalDate: true,
               flags: true,
-              headers: ["from", "subject", "auto-submitted", "return-path", "x-failed-recipients", "content-type"],
+              headers: [
+                "from",
+                "subject",
+                "auto-submitted",
+                "return-path",
+                "x-failed-recipients",
+                "content-type",
+                "x-autoreply",
+                "x-autorespond",
+                "precedence",
+              ],
             },
             { uid: true },
           );
@@ -596,8 +626,11 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
             returnPath: getHeader("return-path"),
             failedRecipients: getHeader("x-failed-recipients"),
             contentType: getHeader("content-type"),
+            xAutoreply: getHeader("x-autoreply"),
+            xAutorespond: getHeader("x-autorespond"),
+            precedence: getHeader("precedence"),
           });
-          if (dsn.kind === "delay") continue;
+          if (dsn.kind === "delay" || dsn.kind === "auto_reply") continue;
           if (dsn.kind === "bounce") {
             if (bouncedAt === null || ts < bouncedAt) {
               bouncedAt = ts;

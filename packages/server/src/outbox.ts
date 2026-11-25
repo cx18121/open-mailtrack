@@ -63,6 +63,7 @@ export type EnqueueRequest = {
   sendAt?: number;
   undoDelayMs?: number;
   isScheduled?: boolean;
+  cancelOnReply?: boolean;
   source?: "extension" | "cli";
   sync?: boolean;
 };
@@ -83,6 +84,7 @@ export type OutboxServiceOptions = {
   publicUrl: string;
   transportFactory?: TransportFactory;
   pollMs?: number;
+  onAutoCanceled?: (args: { item: OutboxItem; repliedAt: number; repliedBy: string[] }) => void;
 };
 
 export function createOutboxService(opts: OutboxServiceOptions) {
@@ -145,7 +147,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
     runStep();
   }
 
-  async function processItem(item: OutboxItem): Promise<{ gmailMessageId: string; gmailThreadId: string }> {
+  async function processItem(item: OutboxItem): Promise<{ gmailMessageId: string; gmailThreadId: string } | null> {
     try {
       const account = db.getAccount(item.account_email);
       if (!account) {
@@ -159,6 +161,29 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       const transport = getTransport(account);
       const tokens = db.listRecipientTokens(item.message_id);
       const senderEmail = account.email.toLowerCase();
+      const anyAlreadySent = tokens.some((t) => t.sent_at !== null);
+
+      // Live fail-closed reply check immediately before sending conditional follow-ups.
+      if (item.cancel_on_reply && item.thread_id && !anyAlreadySent) {
+        let repliedAt: number | null = null;
+        let repliedBy: string[] = [];
+        if (transport.inspectThreadActivity) {
+          const activity = await transport.inspectThreadActivity(item.thread_id, item.created_at, senderEmail);
+          repliedAt = activity.repliedAt;
+          repliedBy = activity.repliedBy.map((r) => r.email);
+        } else if (transport.getThreadReplyAt) {
+          repliedAt = await transport.getThreadReplyAt(item.thread_id, item.created_at, senderEmail);
+        } else {
+          throw new OutboxError(500, "Account transport cannot check replies before sending");
+        }
+        if (repliedAt !== null) {
+          if (db.autoCancelOutbox(item.id, item.message_id, "sending")) {
+            opts.onAutoCanceled?.({ item, repliedAt, repliedBy });
+          }
+          return null;
+        }
+      }
+
       const domain = senderEmail.split("@")[1] || "gmail.com";
       const sentAt = Date.now();
       const sentDate = new Date(sentAt);
@@ -167,7 +192,6 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       // For brand-new group emails, link copies to cleanMessageId via References so Reply-All threads cleanly.
       const recipientReferences = payload.references || (tokens.length > 1 ? cleanMessageId : undefined);
       const sentMessageIds: string[] = [];
-      const anyAlreadySent = tokens.some((t) => t.sent_at !== null);
 
       for (const t of tokens) {
         // Checkpoint: never re-send to a recipient whose SMTP copy Gmail already accepted.
@@ -407,6 +431,10 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         }
       }
 
+      if (req.cancelOnReply && !threadId) {
+        throw new OutboxError(400, "cancelOnReply requires replying inside an existing Gmail thread");
+      }
+
       const cleanHtml = stripServerPixelsFromHtml(req.html, publicUrl);
       const from = req.from || (account.display_name ? `${account.display_name} <${senderEmail}>` : senderEmail);
       const messageId = newTokenId();
@@ -456,6 +484,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
           client_request_id: req.clientRequestId ?? null,
           send_at: sendAt,
           is_scheduled: isScheduled,
+          cancel_on_reply: Boolean(req.cancelOnReply),
           subject: req.subject,
           recipients: { to, cc, bcc },
           thread_id: threadId,
@@ -476,6 +505,15 @@ export function createOutboxService(opts: OutboxServiceOptions) {
           throw new OutboxError(409, "Outbox item was claimed or canceled before synchronous dispatch");
         }
         const gmail = await processItem(mine);
+        if (!gmail) {
+          return {
+            outboxId,
+            messageId,
+            sendAt,
+            remainingMs: 0,
+            status: "canceled" as const,
+          };
+        }
         return {
           outboxId,
           messageId,
@@ -579,6 +617,30 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         void drainDue();
       }
       return { outboxId, sendAt, status: "queued" as const };
+    },
+
+    /** Cancels any queued cancel-on-reply follow-ups on `threadId` scheduled before `repliedAt`. */
+    cancelQueuedForThreadReply(args: {
+      accountEmail: string;
+      threadId: string;
+      repliedAt: number;
+      repliedBy: string[];
+    }): number {
+      const queued = db.listCancelOnReplyOutbox({
+        accountEmail: args.accountEmail,
+        threadId: args.threadId,
+      });
+      let canceled = 0;
+      for (const item of queued) {
+        if (args.repliedAt <= item.created_at) continue;
+        const anySent = db.listRecipientTokens(item.message_id).some((t) => t.sent_at !== null);
+        if (anySent) continue;
+        if (db.autoCancelOutbox(item.id, item.message_id, "queued")) {
+          canceled++;
+          opts.onAutoCanceled?.({ item, repliedAt: args.repliedAt, repliedBy: args.repliedBy });
+        }
+      }
+      return canceled;
     },
 
     drainDue,

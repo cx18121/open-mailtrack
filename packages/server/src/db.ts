@@ -68,6 +68,7 @@ export type OutboxItem = {
   status: OutboxStatus;
   send_at: number;
   is_scheduled: boolean;
+  cancel_on_reply: boolean;
   subject: string;
   recipients: OutboxRecipients;
   thread_id: string | null;
@@ -147,6 +148,7 @@ create table if not exists outbox (
   status text not null,
   send_at integer not null,
   is_scheduled integer not null default 0,
+  cancel_on_reply integer not null default 0,
   subject text not null,
   recipients_json text not null,
   thread_id text,
@@ -181,8 +183,9 @@ type MessageRow = Omit<Message, "recipients" | "replied_by"> & {
   bounce_reason?: string | null;
 };
 type HitRow = Omit<Hit, "headers"> & { headers: string };
-type OutboxRow = Omit<OutboxItem, "is_scheduled" | "recipients" | "payload_encrypted" | "client_request_id"> & {
+type OutboxRow = Omit<OutboxItem, "is_scheduled" | "cancel_on_reply" | "recipients" | "payload_encrypted" | "client_request_id"> & {
   is_scheduled: number;
+  cancel_on_reply?: number;
   recipients_json: string;
   payload_encrypted?: string | null;
   client_request_id?: string | null;
@@ -231,6 +234,7 @@ const rowToOutbox = (r: OutboxRow): OutboxItem => ({
   status: r.status,
   send_at: r.send_at,
   is_scheduled: r.is_scheduled === 1,
+  cancel_on_reply: r.cancel_on_reply === 1,
   subject: r.subject,
   recipients: JSON.parse(r.recipients_json),
   thread_id: r.thread_id,
@@ -284,6 +288,9 @@ export function openDb(path: string) {
   }
   if (!hasColumn(db, "outbox", "client_request_id")) {
     db.exec(`alter table outbox add column client_request_id text`);
+  }
+  if (!hasColumn(db, "outbox", "cancel_on_reply")) {
+    db.exec(`alter table outbox add column cancel_on_reply integer not null default 0`);
   }
   db.exec(`create index if not exists hits_recipient_token on hits (recipient_token, at)`);
   db.exec(
@@ -384,9 +391,9 @@ export function openDb(path: string) {
 
   const insertOutboxStmt = db.prepare(
     `insert into outbox (
-       id, account_email, message_id, client_request_id, status, send_at, is_scheduled,
+       id, account_email, message_id, client_request_id, status, send_at, is_scheduled, cancel_on_reply,
        subject, recipients_json, thread_id, draft_id, payload_encrypted, error, created_at, updated_at
-     ) values (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, null, ?, ?)`,
+     ) values (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?)`,
   );
   const selectOutboxStmt = db.prepare(`select * from outbox where id = ?`);
   const selectOutboxByClientReqStmt = db.prepare(
@@ -413,6 +420,10 @@ export function openDb(path: string) {
   const finishCancelStmt = db.prepare(
     `update outbox set status = 'canceled', payload_encrypted = null, error = null, updated_at = ?
      where id = ? and status = 'canceling'`,
+  );
+  const autoCancelOutboxStmt = db.prepare(
+    `update outbox set status = 'canceled', payload_encrypted = null, error = null, updated_at = ?
+     where id = ? and status = ?`,
   );
   const rescheduleOutboxStmt = db.prepare(
     `update outbox set status = 'queued', send_at = ?, error = null, updated_at = ?
@@ -446,6 +457,7 @@ export function openDb(path: string) {
         client_request_id?: string | null;
         send_at: number;
         is_scheduled: boolean;
+        cancel_on_reply?: boolean;
         subject: string;
         recipients: OutboxRecipients;
         thread_id?: string | null;
@@ -474,6 +486,7 @@ export function openDb(path: string) {
           args.outbox.client_request_id ?? null,
           args.outbox.send_at,
           args.outbox.is_scheduled ? 1 : 0,
+          args.outbox.cancel_on_reply ? 1 : 0,
           args.outbox.subject,
           JSON.stringify(args.outbox.recipients),
           args.outbox.thread_id ?? null,
@@ -674,12 +687,42 @@ export function openDb(path: string) {
       const where = clauses.length ? `where ${clauses.join(" and ")}` : "";
       const rows = db
         .prepare(
-          `select id, account_email, message_id, client_request_id, status, send_at, is_scheduled,
+          `select id, account_email, message_id, client_request_id, status, send_at, is_scheduled, cancel_on_reply,
                   subject, recipients_json, thread_id, draft_id, error, created_at, updated_at
            from outbox ${where} order by send_at asc`,
         )
         .all(...params) as OutboxRow[];
       return rows.map(rowToOutbox);
+    },
+    listCancelOnReplyOutbox(opts: { accountEmail?: string; threadId?: string } = {}) {
+      const clauses = ["status = 'queued'", "cancel_on_reply = 1", "thread_id is not null"];
+      const params: (string | number)[] = [];
+      if (opts.accountEmail) {
+        clauses.push("account_email = ?");
+        params.push(opts.accountEmail.toLowerCase());
+      }
+      if (opts.threadId) {
+        clauses.push("thread_id = ?");
+        params.push(opts.threadId);
+      }
+      const rows = db
+        .prepare(
+          `select id, account_email, message_id, client_request_id, status, send_at, is_scheduled, cancel_on_reply,
+                  subject, recipients_json, thread_id, draft_id, error, created_at, updated_at
+           from outbox where ${clauses.join(" and ")} order by send_at asc`,
+        )
+        .all(...params) as OutboxRow[];
+      return rows.map(rowToOutbox);
+    },
+    /** Atomically cancels an unsent conditional follow-up and removes its tracking rows. */
+    autoCancelOutbox(id: string, messageId: string, expectedStatus: "queued" | "sending"): boolean {
+      return inTx(() => {
+        const res = autoCancelOutboxStmt.run(Date.now(), id, expectedStatus);
+        if (res.changes === 0) return false;
+        deleteTokensForMessage.run(messageId);
+        deleteMessage.run(messageId);
+        return true;
+      });
     },
     claimOneDueOutbox(now = Date.now()): OutboxItem | null {
       return inTx(() => {

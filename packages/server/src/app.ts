@@ -100,12 +100,18 @@ export function createApp(db: Db, config: Config) {
     digestTimezone: config.digestTimezone,
   });
   const transportFactory = config.transportFactory ?? defaultTransportFactory;
+  let notifierRef: Notifier | null = null;
   const outbox: OutboxService = createOutboxService({
     db,
     cipher,
     publicUrl,
     transportFactory,
     pollMs: config.outboxPollMs,
+    onAutoCanceled: (args) => {
+      void notifierRef?.notifyAutoCanceled(args).catch((err) => {
+        console.error("[open-mailtrack] auto-cancel notification failed:", err);
+      });
+    },
   });
 
   type BatchContext = {
@@ -238,6 +244,7 @@ export function createApp(db: Db, config: Config) {
         .map((m) => ({ ...m, ...summaryOf(m, ctx) }));
     },
   });
+  notifierRef = notifier;
 
   const replyChecker: ReplyChecker = createReplyChecker({
     db,
@@ -247,6 +254,9 @@ export function createApp(db: Db, config: Config) {
       void notifier.notifyBounce(args).catch((err) => {
         console.error("[open-mailtrack] bounce notification failed:", err);
       });
+    },
+    onReply: ({ sender, threadId, repliedAt, repliedBy }) => {
+      outbox.cancelQueuedForThreadReply({ accountEmail: sender, threadId, repliedAt, repliedBy });
     },
   });
 
@@ -528,6 +538,7 @@ export function createApp(db: Db, config: Config) {
     status: o.status,
     sendAt: o.send_at,
     isScheduled: o.is_scheduled,
+    cancelOnReply: o.cancel_on_reply,
     subject: o.subject,
     recipients: o.recipients,
     threadId: o.thread_id,
@@ -556,7 +567,8 @@ export function createApp(db: Db, config: Config) {
         !isOptionalString(body.clientRequestId) ||
         (body.threadId !== undefined && body.threadId !== null && typeof body.threadId !== "string") ||
         (body.draftId !== undefined && body.draftId !== null && typeof body.draftId !== "string") ||
-        (body.draftMessageId !== undefined && body.draftMessageId !== null && typeof body.draftMessageId !== "string")
+        (body.draftMessageId !== undefined && body.draftMessageId !== null && typeof body.draftMessageId !== "string") ||
+        (body.cancelOnReply !== undefined && typeof body.cancelOnReply !== "boolean")
       ) {
         return c.json({ error: "invalid outbox payload" }, 400);
       }
