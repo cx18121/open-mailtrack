@@ -86,6 +86,63 @@ function toDatetimeLocal(ts: number): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+function isExtensionAlive(): boolean {
+  try {
+    chrome.runtime.getURL("");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Closing an inline reply via InboxSDK's `compose.discard()` triggers Gmail's native
+ * "Draft discarded. Undo" toast, which overrides our "Sending message…" ButterBar and
+ * tricks users into clicking Undo and double-sending. Watch briefly for that native toast,
+ * hide it, and re-show our real send status toast.
+ */
+function suppressDraftDiscardedToast(
+  doc: Document,
+  hideGmailMessage: (() => void) | undefined,
+  reshow: () => void,
+  durationMs = 3500,
+) {
+  let done = false;
+  let followUpTimer: ReturnType<typeof setTimeout> | null = null;
+  const finish = () => {
+    if (done) return;
+    done = true;
+    observer.disconnect();
+    clearTimeout(expiryTimer);
+    hideGmailMessage?.();
+    reshow();
+    // InboxSDK's googleAddedNotice observer is chunked asynchronously; re-assert on the next tick.
+    followUpTimer = setTimeout(() => {
+      hideGmailMessage?.();
+      reshow();
+    }, 50);
+  };
+  const check = () => {
+    if (done) return;
+    const alerts = doc.querySelectorAll<HTMLElement>('[role="alert"], .b8.UC, .bAq');
+    for (const el of alerts) {
+      if (el.closest(".inboxsdk__butterbar")) continue;
+      if (/draft discarded/i.test(el.textContent ?? "")) {
+        finish();
+        return;
+      }
+    }
+  };
+  const observer = new MutationObserver(check);
+  observer.observe(doc.body, { childList: true, subtree: true, characterData: true });
+  const expiryTimer = setTimeout(() => {
+    done = true;
+    observer.disconnect();
+    if (followUpTimer) clearTimeout(followUpTimer);
+  }, durationMs);
+  check();
+}
+
 async function main() {
   const settings = await loadSettings();
   if (!settings) {
@@ -130,7 +187,7 @@ async function main() {
 
   /** Emits immediately for each subscriber and then every REFRESH_MS while the page is visible. */
   const ticks = Kefir.interval(REFRESH_MS, null)
-    .filter(() => document.visibilityState === "visible")
+    .filter(() => document.visibilityState === "visible" && isExtensionAlive())
     .toProperty(() => null);
 
   const openOptions = () => {
@@ -141,6 +198,7 @@ async function main() {
     sdk.ButterBar?.showMessage?.({
       text: opts.text,
       time: opts.time ?? 6000,
+      priority: 100,
       buttons: opts.buttons,
     });
   };
@@ -277,12 +335,8 @@ async function main() {
         });
 
         clientRequestId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-        // InboxSDK's close() is a no-op for inline replies; discard() closes the inline compose cleanly.
-        if (compose.isInlineReplyForm?.()) {
-          compose.discard?.();
-        } else {
-          compose.close?.();
-        }
+        const composeDoc = compose.getBodyElement().ownerDocument;
+        const wasInline = Boolean(compose.isInlineReplyForm?.());
 
         const undoAction = async () => {
           try {
@@ -301,26 +355,40 @@ async function main() {
           }
         };
 
-        const undoTimeMs = res.remainingMs ?? (opts.undoDelayMs ?? 0);
-        if (opts.isScheduled && opts.sendAt) {
-          const suffix = opts.cancelOnReply ? " (cancels if they reply)" : "";
-          showButter({
-            text: `Scheduled for ${when(opts.sendAt, Date.now())}${suffix}`,
-            time: 8000,
-            buttons: [
-              { title: "View scheduled", onClick: () => openTracked({ section: "scheduled" }) },
-              { title: "Undo", onClick: () => void undoAction() },
-            ],
-          });
-        } else if (undoTimeMs > 0) {
-          showButter({
-            text: "Sending message…",
-            time: undoTimeMs,
-            buttons: [{ title: "Undo", onClick: () => void undoAction() }],
-          });
+        const initialUndoMs = res.remainingMs ?? (opts.undoDelayMs ?? 0);
+        const showSendToast = () => {
+          if (opts.isScheduled && opts.sendAt) {
+            const suffix = opts.cancelOnReply ? " (cancels if they reply)" : "";
+            showButter({
+              text: `Scheduled for ${when(opts.sendAt, Date.now())}${suffix}`,
+              time: 8000,
+              buttons: [
+                { title: "View scheduled", onClick: () => openTracked({ section: "scheduled" }) },
+                { title: "Undo", onClick: () => void undoAction() },
+              ],
+            });
+          } else if (initialUndoMs > 0) {
+            const remaining = res.sendAt ? Math.max(1500, res.sendAt - Date.now()) : initialUndoMs;
+            showButter({
+              text: "Sending message…",
+              time: remaining,
+              buttons: [{ title: "Undo", onClick: () => void undoAction() }],
+            });
+          } else {
+            showButter({ text: "Message sent" });
+          }
+        };
+
+        // InboxSDK's close() is a no-op for inline replies; discard() closes the inline compose cleanly.
+        // Suppress Gmail's native "Draft discarded. Undo" toast so it never hides our real send status.
+        if (wasInline) {
+          suppressDraftDiscardedToast(composeDoc, () => sdk.ButterBar?.hideGmailMessage?.(), showSendToast);
+          compose.discard?.();
         } else {
-          showButter({ text: "Queued to send…" });
+          compose.close?.();
         }
+
+        showSendToast();
       } catch (err) {
         // Fail closed: keep compose window and draft intact so nothing is lost.
         log("tracked send failed", err);
@@ -822,7 +890,13 @@ async function main() {
     };
 
     void render();
-    const timer = setInterval(() => document.visibilityState === "visible" && render(), REFRESH_MS);
+    const timer = setInterval(() => {
+      if (!isExtensionAlive()) {
+        clearInterval(timer);
+        return;
+      }
+      if (document.visibilityState === "visible") void render();
+    }, REFRESH_MS);
     route.on("destroy", () => {
       alive = false;
       routeStateSetter = null;

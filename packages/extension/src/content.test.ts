@@ -11,6 +11,7 @@ const mocks = vi.hoisted(() => ({
   view: vi.fn(),
   messageStatus: vi.fn(),
   showMessage: vi.fn(),
+  hideGmailMessage: vi.fn(),
   openDraftByMessageID: vi.fn(),
   showModalView: vi.fn(),
 }));
@@ -27,7 +28,7 @@ vi.mock("@inboxsdk/core", () => ({
     Router: { handleCustomRoute: vi.fn(), goto: vi.fn().mockResolvedValue(undefined) },
     Search: { registerSearchQueryRewriter: vi.fn() },
     NavMenu: { addNavItem: vi.fn() },
-    ButterBar: { showMessage: mocks.showMessage },
+    ButterBar: { showMessage: mocks.showMessage, hideGmailMessage: mocks.hideGmailMessage },
     Widgets: { showModalView: mocks.showModalView },
   }),
 }));
@@ -288,5 +289,50 @@ describe("conditional schedule send", () => {
     const fresh = makeCompose({ isReply: false, threadId: "ephemeral-draft-thread" });
     fresh.events.scheduleSendMenuOpening({ cancel: vi.fn() });
     expect(capturedModal!.el.querySelector(".omt-schedule-check")).toBeNull();
+  });
+
+  it("suppresses Gmail's Draft discarded toast after sending an inline reply and re-shows Sending message", async () => {
+    await boot(true);
+    const discard = vi.fn();
+    const events: Record<string, (...args: any[]) => any> = {};
+    const body = document.createElement("div");
+    body.innerHTML = "<p>Reply text</p>";
+    mocks.composeHandler.mock.calls[0][0]({
+      addButton: vi.fn(),
+      addComposeNotice: vi.fn(() => ({ el: document.createElement("div") })),
+      on: (name: string, fn: (...args: any[]) => any) => {
+        events[name] = fn;
+      },
+      getToRecipients: () => [{ emailAddress: "ana@example.com" }],
+      getCcRecipients: () => [],
+      getBccRecipients: () => [],
+      getFromContact: () => ({ name: "Charlie", emailAddress: "me@cornell.edu" }),
+      getBodyElement: () => body,
+      getHTMLContent: () => body.innerHTML,
+      getSubject: () => "Re: Offer",
+      isReply: () => true,
+      isInlineReplyForm: () => true,
+      getThreadID: () => "gt1",
+      getCurrentDraftID: async () => "draft-123",
+      getInitialMessageID: () => "dmsg-orig",
+      discard,
+      close: vi.fn(),
+    });
+
+    events.presending({ cancel: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(discard).toHaveBeenCalledOnce();
+    const initialCalls = mocks.showMessage.mock.calls.length;
+
+    // Simulate Gmail popping up its native "Draft discarded. Undo" toast 200ms later
+    const alert = document.createElement("div");
+    alert.setAttribute("role", "alert");
+    alert.textContent = "Draft discarded. Undo";
+    document.body.append(alert);
+    await vi.advanceTimersByTimeAsync(60);
+
+    expect(mocks.hideGmailMessage).toHaveBeenCalled();
+    expect(mocks.showMessage.mock.calls.length).toBeGreaterThan(initialCalls);
+    expect(mocks.showMessage.mock.calls.at(-1)?.[0]).toMatchObject({ text: "Sending message…" });
   });
 });
