@@ -756,4 +756,149 @@ describe("Discord alerts, settings, bounce detection, and post-reply filtering",
 
     db.close();
   });
+
+  it("blocks accidental duplicate sends within 120s, fills empty reply subjects, validates recipients/schedules, and handles inline images & expectedAttachmentCount", async () => {
+    const baseTime = Date.UTC(2026, 4, 15, 12, 0, 0);
+    vi.spyOn(Date, "now").mockReturnValue(baseTime);
+
+    const db = openDb(":memory:");
+    const sentRaw: Buffer[] = [];
+    let draftFetchCount = 0;
+
+    const draftOneFile = await compileMime({
+      from: "me@example.com",
+      to: ["alice@company.com"],
+      subject: "",
+      html: '<p>See attached <img src="cid:ii_inline1"></p>',
+      messageId: "<draft-1@example.com>",
+      attachments: [
+        { filename: "first.pdf", contentType: "application/pdf", contentBase64: Buffer.from("one").toString("base64"), disposition: "attachment" },
+        { filename: "shot.png", contentType: "image/png", contentBase64: Buffer.from("img").toString("base64"), cid: "ii_inline1", disposition: "inline" },
+      ],
+    });
+    const draftTwoFiles = await compileMime({
+      from: "me@example.com",
+      to: ["alice@company.com"],
+      subject: "",
+      html: '<p>See attached <img src="cid:ii_inline1"></p>',
+      messageId: "<draft-2@example.com>",
+      attachments: [
+        { filename: "first.pdf", contentType: "application/pdf", contentBase64: Buffer.from("one").toString("base64"), disposition: "attachment" },
+        { filename: "second.pdf", contentType: "application/pdf", contentBase64: Buffer.from("two").toString("base64"), disposition: "attachment" },
+        { filename: "shot.png", contentType: "image/png", contentBase64: Buffer.from("img").toString("base64"), cid: "ii_inline1", disposition: "inline" },
+      ],
+    });
+
+    const transport: MailboxTransport = {
+      ...makeFakeTransport(),
+      async getThreadReplyHeaders() {
+        return { inReplyTo: "<parent@company.com>", references: "<parent@company.com>", subject: "Internship offer" };
+      },
+      async getDraftRaw() {
+        draftFetchCount++;
+        return { raw: draftFetchCount === 1 ? draftOneFile : draftTwoFiles, threadId: "t_offer" };
+      },
+      async sendSmtpCopy(_from, _to, raw) {
+        sentRaw.push(raw);
+      },
+    };
+
+    const app = createApp(db, {
+      apiKey: API_KEY,
+      publicUrl: "https://t.example.com",
+      transportFactory: () => transport,
+    });
+    await app.request("/api/accounts/app-password", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ email: "me@example.com", appPassword: "abcd efgh ijkl mnop", skipVerify: true }),
+    });
+
+    // 1. Rejects invalid recipient instead of silently dropping it from envelope
+    const badRec = await app.request("/api/outbox", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({
+        sender: "me@example.com",
+        to: ["not-an-email"],
+        cc: ["alice@company.com"],
+        subject: "Hi",
+        html: "<p>Hi</p>",
+      }),
+    });
+    expect(badRec.status).toBe(400);
+
+    // 2. Rejects past schedule and sync + future sendAt
+    expect(
+      (
+        await app.request("/api/outbox", {
+          method: "POST",
+          headers: auth,
+          body: JSON.stringify({
+            sender: "me@example.com",
+            to: ["alice@company.com"],
+            subject: "Past",
+            html: "<p>Hi</p>",
+            sendAt: baseTime - 60_000,
+            isScheduled: true,
+          }),
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await app.request("/api/outbox", {
+          method: "POST",
+          headers: auth,
+          body: JSON.stringify({
+            sender: "me@example.com",
+            to: ["alice@company.com"],
+            subject: "Future sync",
+            html: "<p>Hi</p>",
+            sendAt: baseTime + 60_000,
+            sync: true,
+          }),
+        })
+      ).status,
+    ).toBe(400);
+
+    // 3. Empty reply subject falls back to "Re: Internship offer"; retries draft until both expected files arrive;
+    // rewrites Gmail view=fimg inline URL -> cid:ii_inline1 AND converts data:image/png -> cid: attachment
+    const payload = {
+      sender: "me@example.com",
+      to: ["alice@company.com"],
+      subject: "",
+      html: '<p>Thanks <img src="https://mail.google.com/mail/u/0?ui=2&view=fimg&attid=0.1"><img src="data:image/png;base64,iVBORw0KGgo="></p>',
+      threadId: "t_offer",
+      draftId: "d1",
+      hasAttachments: true,
+      expectedAttachmentCount: 2,
+      clientRequestId: "req-1",
+      sync: true,
+    };
+    const first = await app.request("/api/outbox", { method: "POST", headers: auth, body: JSON.stringify(payload) });
+    expect(first.status).toBe(201);
+    const firstJson = await first.json();
+    expect(draftFetchCount).toBe(2);
+    expect(db.getMessage(firstJson.messageId)!.subject).toBe("Re: Internship offer");
+    const rawStr = sentRaw[0].toString("utf8");
+    expect(rawStr).toContain("Subject: Re: Internship offer");
+    expect(rawStr).toContain("cid:ii_inline1");
+    expect(rawStr).not.toContain("view=fimg");
+    expect(rawStr).not.toContain("data:image/png;base64");
+    expect(rawStr).toContain("first.pdf");
+    expect(rawStr).toContain("second.pdf");
+
+    // 4. Accidental duplicate send 6 seconds later with a NEW clientRequestId is blocked with 409!
+    vi.spyOn(Date, "now").mockReturnValue(baseTime + 6_000);
+    const dup = await app.request("/api/outbox", {
+      method: "POST",
+      headers: auth,
+      body: JSON.stringify({ ...payload, clientRequestId: "req-2" }),
+    });
+    expect(dup.status).toBe(409);
+    expect(sentRaw).toHaveLength(1);
+
+    db.close();
+  });
 });

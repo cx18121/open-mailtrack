@@ -55,7 +55,12 @@ export interface MailboxTransport {
   /** Returns the earliest reply timestamp from someone other than `senderEmail` in `threadId` after `sentAt`, or null. */
   getThreadReplyAt?(threadId: string, sentAt: number, senderEmail: string): Promise<number | null>;
   /** Inspects a thread for human replies (with senders) and delivery bounces after `sentAt`. */
-  inspectThreadActivity?(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity>;
+  inspectThreadActivity?(
+    threadId: string,
+    sentAt: number,
+    senderEmail: string,
+    extraSelfEmails?: string[],
+  ): Promise<ThreadActivity>;
   getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null>;
   deleteDraft(draftId?: string | null, draftMessageId?: string | null): Promise<void>;
   createDraft(raw: Buffer, threadId?: string | null): Promise<{ draftId: string; messageId: string }>;
@@ -248,7 +253,12 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
     });
   }
 
-  async function inspectThreadActivity(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity> {
+  async function inspectThreadActivity(
+    threadId: string,
+    sentAt: number,
+    senderEmail: string,
+    extraSelfEmails: string[] = [],
+  ): Promise<ThreadActivity> {
     const headersQuery = [
       "From",
       "Subject",
@@ -272,7 +282,7 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
         payload?: { headers?: { name: string; value: string }[] };
       }[];
     };
-    const me = senderEmail.toLowerCase();
+    const selfSet = new Set([senderEmail, ...extraSelfEmails].map((e) => e.trim().toLowerCase()).filter(Boolean));
     let repliedAt: number | null = null;
     const repliedByMap = new Map<string, number>();
     let bouncedAt: number | null = null;
@@ -305,7 +315,7 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
         continue;
       }
       const fromEmail = extractEmailAddress(fromHeader);
-      if (!fromEmail || fromEmail === me) continue;
+      if (!fromEmail || selfSet.has(fromEmail)) continue;
       if (repliedAt === null || ts < repliedAt) repliedAt = ts;
       const prev = repliedByMap.get(fromEmail);
       if (prev === undefined || ts < prev) repliedByMap.set(fromEmail, ts);
@@ -387,10 +397,14 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
       if (res.status === 404) return null;
       if (!res.ok) throw new Error(`Gmail thread fetch failed: HTTP ${res.status}`);
       const data = (await res.json()) as {
-        messages?: { payload?: { headers?: { name: string; value: string }[] } }[];
+        messages?: { labelIds?: string[]; payload?: { headers?: { name: string; value: string }[] } }[];
       };
-      const last = data.messages?.at(-1);
-      const headers = last?.payload?.headers ?? [];
+      const eligible = (data.messages ?? []).filter(
+        (m) => !m.labelIds?.includes("DRAFT") && !m.labelIds?.includes("TRASH"),
+      );
+      const last = eligible.at(-1);
+      if (!last) return null;
+      const headers = last.payload?.headers ?? [];
       const h = (name: string) => headers.find((x) => x.name.toLowerCase() === name)?.value;
       const msgId = h("message-id");
       const existingRefs = h("references");
@@ -492,15 +506,19 @@ export function createOAuthTransport(email: string, creds: OAuthCredentials): Ma
 
       for (const delay of delays) {
         await sleep(delay);
-        await cleanupSentCopiesTracked(
-          {
-            sentMessageIds: args.sentMessageIds,
-            recipientTokens: args.recipientTokens,
-            keepMessageId: inserted.id,
-            sentAt: args.sentAt,
-          },
-          trashedIds,
-        );
+        try {
+          await cleanupSentCopiesTracked(
+            {
+              sentMessageIds: args.sentMessageIds,
+              recipientTokens: args.recipientTokens,
+              keepMessageId: inserted.id,
+              sentAt: args.sentAt,
+            },
+            trashedIds,
+          );
+        } catch (err) {
+          console.error("[open-mailtrack] sent copy cleanup pass failed (will retry):", err);
+        }
         if (trashedIds.size >= expected) break;
       }
 
@@ -570,10 +588,15 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
     }
   }
 
-  async function inspectThreadActivity(threadId: string, sentAt: number, senderEmail: string): Promise<ThreadActivity> {
+  async function inspectThreadActivity(
+    threadId: string,
+    sentAt: number,
+    senderEmail: string,
+    extraSelfEmails: string[] = [],
+  ): Promise<ThreadActivity> {
     const dec = hexToDec(threadId);
     if (!dec) return { repliedAt: null, repliedBy: [], bouncedAt: null, bounceReason: null };
-    const me = senderEmail.toLowerCase();
+    const selfSet = new Set([senderEmail, ...extraSelfEmails].map((e) => e.trim().toLowerCase()).filter(Boolean));
     return withImap(async (client) => {
       const list = await client.list();
       const allMail = list.find((b) => b.specialUse === "\\All")?.path ?? "[Gmail]/All Mail";
@@ -638,7 +661,7 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
             }
             continue;
           }
-          if (!fromAddr || fromAddr === me) continue;
+          if (!fromAddr || selfSet.has(fromAddr)) continue;
           if (repliedAt === null || ts < repliedAt) repliedAt = ts;
           const prev = repliedByMap.get(fromAddr);
           if (prev === undefined || ts < prev) repliedByMap.set(fromAddr, ts);
@@ -707,16 +730,22 @@ export function createAppPasswordTransport(email: string, creds: AppPasswordCred
     },
 
     async getDraftRaw(draftId?: string | null, draftMessageId?: string | null): Promise<{ raw: Buffer; threadId?: string } | null> {
-      const dec = hexToDec(draftMessageId ?? "") ?? hexToDec(draftId ?? "");
-      if (!dec) return null;
+      const candidates = [hexToDec(draftMessageId ?? ""), hexToDec(draftId ?? "")].filter(
+        (x, i, arr): x is string => Boolean(x) && arr.indexOf(x) === i,
+      );
+      if (candidates.length === 0) return null;
       return withImap(async (client, boxes) => {
         const lock = await client.getMailboxLock(boxes.drafts);
         try {
-          const uids = await client.search({ emailId: dec }, { uid: true });
-          if (!uids || uids.length === 0) return null;
-          const msg = await client.fetchOne(String(uids[0]), { source: true, threadId: true }, { uid: true });
-          if (!msg || !msg.source) return null;
-          return { raw: Buffer.from(msg.source), threadId: msg.threadId ? decToHex(msg.threadId) : undefined };
+          for (const dec of candidates) {
+            const uids = await client.search({ emailId: dec }, { uid: true });
+            if (!uids || uids.length === 0) continue;
+            const msg = await client.fetchOne(String(uids[0]), { source: true, threadId: true }, { uid: true });
+            if (msg && msg.source) {
+              return { raw: Buffer.from(msg.source), threadId: msg.threadId ? decToHex(msg.threadId) : undefined };
+            }
+          }
+          return null;
         } finally {
           lock.release();
         }

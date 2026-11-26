@@ -105,6 +105,8 @@ export type OutboxEnqueueRequest = {
   draftId?: string | null;
   draftMessageId?: string | null;
   hasAttachments?: boolean;
+  expectedAttachmentCount?: number;
+  allowDuplicate?: boolean;
   clientRequestId?: string;
   sendAt?: number;
   undoDelayMs?: number;

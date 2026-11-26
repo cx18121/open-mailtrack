@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import MailComposer from "nodemailer/lib/mail-composer/index.js";
 import PostalMime from "postal-mime";
 
@@ -69,6 +70,56 @@ export function stripServerPixelsFromHtml(html: string, publicUrl: string): stri
     if (tag.includes(hostPath)) return "";
     return tag;
   });
+}
+
+const DATA_IMG_SRC_RE = /(<img\b[^>]*\bsrc=)(["'])data:(image\/[a-z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)\2/gi;
+const GMAIL_DRAFT_IMG_SRC_RE = /(<img\b[^>]*\bsrc=)(["'])(https:\/\/mail\.google\.com\/mail\/[^"']*(?:view=fimg|view=att|disp=emb)[^"']*)\2/gi;
+
+/** Converts pasted base64 data-URI images into proper CID inline attachments so recipients see them. */
+export function extractDataUriImages(html: string): { html: string; inlineAttachments: MimeAttachment[] } {
+  const inlineAttachments: MimeAttachment[] = [];
+  let idx = 0;
+  const rewritten = html.replace(DATA_IMG_SRC_RE, (_full, prefix: string, quote: string, contentType: string, b64: string) => {
+    idx++;
+    const cleanB64 = b64.replace(/\s+/g, "");
+    const ext = contentType.split("/")[1]?.replace(/[^a-z0-9]/gi, "") || "png";
+    const digest = createHash("sha256").update(cleanB64).digest("hex").slice(0, 12);
+    const cid = `omt-inline-${idx}-${digest}@open-mailtrack`;
+    inlineAttachments.push({
+      filename: `image-${idx}.${ext}`,
+      contentType,
+      contentBase64: cleanB64,
+      cid,
+      disposition: "inline",
+    });
+    return `${prefix}${quote}cid:${cid}${quote}`;
+  });
+  return { html: rewritten, inlineAttachments };
+}
+
+/** Counts private Gmail draft image URLs in editor HTML that must be mapped to draft CID attachments. */
+export function countGmailDraftInlineImages(html: string): number {
+  const matches = html.match(GMAIL_DRAFT_IMG_SRC_RE);
+  return matches ? matches.length : 0;
+}
+
+/** Rewrites private Gmail draft image URLs to `cid:` references from the saved Gmail draft MIME. */
+export function rewriteGmailDraftInlineImages(
+  html: string,
+  inlineAttachments: MimeAttachment[],
+): { html: string; unresolved: number } {
+  const cids = inlineAttachments.filter((a) => a.disposition === "inline" && a.cid).map((a) => a.cid!);
+  let i = 0;
+  let unresolved = 0;
+  const rewritten = html.replace(GMAIL_DRAFT_IMG_SRC_RE, (full, prefix: string, quote: string) => {
+    const cid = cids[i++];
+    if (!cid) {
+      unresolved++;
+      return full;
+    }
+    return `${prefix}${quote}cid:${cid}${quote}`;
+  });
+  return { html: rewritten, unresolved };
 }
 
 export function injectPixelIntoHtml(html: string, pixelUrl: string): string {

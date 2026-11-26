@@ -65,6 +65,7 @@ export type OutboxItem = {
   account_email: string;
   message_id: string;
   client_request_id: string | null;
+  content_hash: string | null;
   status: OutboxStatus;
   send_at: number;
   is_scheduled: boolean;
@@ -145,6 +146,7 @@ create table if not exists outbox (
   account_email text not null,
   message_id text not null,
   client_request_id text,
+  content_hash text,
   status text not null,
   send_at integer not null,
   is_scheduled integer not null default 0,
@@ -183,12 +185,13 @@ type MessageRow = Omit<Message, "recipients" | "replied_by"> & {
   bounce_reason?: string | null;
 };
 type HitRow = Omit<Hit, "headers"> & { headers: string };
-type OutboxRow = Omit<OutboxItem, "is_scheduled" | "cancel_on_reply" | "recipients" | "payload_encrypted" | "client_request_id"> & {
+type OutboxRow = Omit<OutboxItem, "is_scheduled" | "cancel_on_reply" | "recipients" | "payload_encrypted" | "client_request_id" | "content_hash"> & {
   is_scheduled: number;
   cancel_on_reply?: number;
   recipients_json: string;
   payload_encrypted?: string | null;
   client_request_id?: string | null;
+  content_hash?: string | null;
 };
 
 function parseRepliedBy(raw: string | null | undefined): RepliedByEntry[] {
@@ -231,6 +234,7 @@ const rowToOutbox = (r: OutboxRow): OutboxItem => ({
   account_email: r.account_email,
   message_id: r.message_id,
   client_request_id: r.client_request_id ?? null,
+  content_hash: r.content_hash ?? null,
   status: r.status,
   send_at: r.send_at,
   is_scheduled: r.is_scheduled === 1,
@@ -292,7 +296,11 @@ export function openDb(path: string) {
   if (!hasColumn(db, "outbox", "cancel_on_reply")) {
     db.exec(`alter table outbox add column cancel_on_reply integer not null default 0`);
   }
+  if (!hasColumn(db, "outbox", "content_hash")) {
+    db.exec(`alter table outbox add column content_hash text`);
+  }
   db.exec(`create index if not exists hits_recipient_token on hits (recipient_token, at)`);
+  db.exec(`create index if not exists outbox_content_hash on outbox (account_email, content_hash, created_at)`);
   db.exec(
     `create unique index if not exists outbox_client_request_id on outbox (account_email, client_request_id) where client_request_id is not null`,
   );
@@ -391,13 +399,18 @@ export function openDb(path: string) {
 
   const insertOutboxStmt = db.prepare(
     `insert into outbox (
-       id, account_email, message_id, client_request_id, status, send_at, is_scheduled, cancel_on_reply,
+       id, account_email, message_id, client_request_id, content_hash, status, send_at, is_scheduled, cancel_on_reply,
        subject, recipients_json, thread_id, draft_id, payload_encrypted, error, created_at, updated_at
-     ) values (?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?)`,
+     ) values (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, null, ?, ?)`,
   );
   const selectOutboxStmt = db.prepare(`select * from outbox where id = ?`);
   const selectOutboxByClientReqStmt = db.prepare(
     `select * from outbox where account_email = ? and client_request_id = ?`,
+  );
+  const selectRecentOutboxByHashStmt = db.prepare(
+    `select * from outbox
+     where account_email = ? and content_hash = ? and status in ('queued', 'sending', 'sent') and created_at >= ?
+     order by created_at desc limit 1`,
   );
   const selectOneDueOutboxStmt = db.prepare(
     `select * from outbox where status = 'queued' and send_at <= ? order by send_at asc limit 1`,
@@ -415,7 +428,7 @@ export function openDb(path: string) {
     `update outbox set status = 'canceling', updated_at = ? where id = ? and status in ('queued', 'failed')`,
   );
   const abortCancelStmt = db.prepare(
-    `update outbox set status = ?, updated_at = ? where id = ? and status = 'canceling'`,
+    `update outbox set status = ?, error = coalesce(?, error), updated_at = ? where id = ? and status = 'canceling'`,
   );
   const finishCancelStmt = db.prepare(
     `update outbox set status = 'canceled', payload_encrypted = null, error = null, updated_at = ?
@@ -455,6 +468,7 @@ export function openDb(path: string) {
         account_email: string;
         message_id: string;
         client_request_id?: string | null;
+        content_hash?: string | null;
         send_at: number;
         is_scheduled: boolean;
         cancel_on_reply?: boolean;
@@ -484,6 +498,7 @@ export function openDb(path: string) {
           args.outbox.account_email.toLowerCase(),
           args.outbox.message_id,
           args.outbox.client_request_id ?? null,
+          args.outbox.content_hash ?? null,
           args.outbox.send_at,
           args.outbox.is_scheduled ? 1 : 0,
           args.outbox.cancel_on_reply ? 1 : 0,
@@ -672,6 +687,10 @@ export function openDb(path: string) {
       const row = selectOutboxByClientReqStmt.get(accountEmail.toLowerCase(), clientRequestId) as OutboxRow | undefined;
       return row ? rowToOutbox(row) : null;
     },
+    findRecentOutboxByContentHash(accountEmail: string, contentHash: string, sinceMs: number) {
+      const row = selectRecentOutboxByHashStmt.get(accountEmail.toLowerCase(), contentHash, sinceMs) as OutboxRow | undefined;
+      return row ? rowToOutbox(row) : null;
+    },
     /** Lists outbox metadata without loading encrypted attachment payloads. */
     listOutbox(opts: { accountEmail?: string; statuses?: OutboxStatus[] } = {}) {
       const clauses: string[] = [];
@@ -759,8 +778,8 @@ export function openDb(path: string) {
         return { item: rowToOutbox(row), previousStatus };
       });
     },
-    abortCancelOutbox(id: string, previousStatus: "queued" | "failed") {
-      abortCancelStmt.run(previousStatus, Date.now(), id);
+    abortCancelOutbox(id: string, nextStatus: "queued" | "failed", error?: string | null) {
+      abortCancelStmt.run(nextStatus, error ?? null, Date.now(), id);
     },
     finishCancelOutbox(id: string, messageId: string) {
       inTx(() => {

@@ -94,11 +94,26 @@ async function send(argv: string[]) {
     },
   });
   const config = readConfig();
+  const limitNum = Number(values.limit);
+  if (!Number.isInteger(limitNum) || limitNum < 0) {
+    throw new Error(`--limit must be a non-negative integer (got "${values.limit}")`);
+  }
+  const delaySec = Number(values.delay);
+  if (!Number.isFinite(delaySec) || delaySec < 0) {
+    throw new Error(`--delay must be a non-negative number of seconds (got "${values.delay}")`);
+  }
+  const ccList = values.cc
+    ? values.cc
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean)
+    : [];
+
   const rows = await readRows(values.input);
-  const batch = rows.slice(0, Number(values.limit));
+  const batch = rows.slice(0, limitNum);
   const attachments = attachmentPaths();
   const dryRun = values["dry-run"];
-  const delayMs = Number(values.delay) * 1000;
+  const delayMs = delaySec * 1000;
 
   const senderEmail = (values.from ?? config.senderEmail).trim().toLowerCase();
   let senderName = values["sender-name"] ?? config.senderName;
@@ -137,7 +152,7 @@ async function send(argv: string[]) {
         sender: senderEmail,
         from,
         to: [to],
-        cc: values.cc ? [values.cc] : [],
+        cc: ccList,
         subject,
         html: `<div>${textToHtml(body)}</div>`,
         text: body,
@@ -156,6 +171,7 @@ async function send(argv: string[]) {
     if (i < batch.length - 1) await sleep(delayMs);
   }
   console.log(`\nDone. Sent: ${sent}  Failed: ${failed}`);
+  if (failed > 0) process.exitCode = 1;
 }
 
 const [command, ...rest] = process.argv.slice(2);

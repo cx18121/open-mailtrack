@@ -414,13 +414,16 @@ describe("unified outbox, per-recipient tracking, Apple MPP, and contacts", () =
       })
     ).json();
 
-    // First cancel fails in Gmail -> snapshot and message MUST stay intact!
+    // First cancel fails in Gmail -> send is paused in `failed` (NEVER re-armed to auto-send), snapshot stays intact!
     const failedCancel = await app.request(`/api/outbox/${queued.outboxId}`, { method: "DELETE", headers: auth });
     expect(failedCancel.status).toBe(500);
     const preserved = db.getOutbox(queued.outboxId)!;
-    expect(preserved.status).toBe("queued");
+    expect(preserved.status).toBe("failed");
     expect(preserved.payload_encrypted).not.toBeNull();
     expect(db.getMessage(queued.messageId)).not.toBeNull();
+    // Even if time advances past sendAt, drainDue must NOT send an undone email!
+    await app.outbox.drainDue();
+    expect(base.smtpCopies).toHaveLength(0);
 
     // Retry cancel once Gmail recovers -> draft restored and snapshot purged!
     failCreateDraft = false;

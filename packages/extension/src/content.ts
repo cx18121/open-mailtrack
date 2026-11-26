@@ -98,13 +98,15 @@ function isExtensionAlive(): boolean {
 /**
  * Closing an inline reply via InboxSDK's `compose.discard()` triggers Gmail's native
  * "Draft discarded. Undo" toast, which overrides our "Sending message…" ButterBar and
- * tricks users into clicking Undo and double-sending. Watch briefly for that native toast,
- * hide it, and re-show our real send status toast.
+ * tricks users into clicking Undo and double-sending. Watch briefly for Gmail's native
+ * alert container, hide it, and re-show our real send status toast (unless a newer toast
+ * superseded it).
  */
 function suppressDraftDiscardedToast(
   doc: Document,
   hideGmailMessage: (() => void) | undefined,
   reshow: () => void,
+  isCurrentToast: () => boolean,
   durationMs = 3500,
 ) {
   let done = false;
@@ -114,18 +116,21 @@ function suppressDraftDiscardedToast(
     done = true;
     observer.disconnect();
     clearTimeout(expiryTimer);
+    if (!isCurrentToast()) return;
     hideGmailMessage?.();
     reshow();
     // InboxSDK's googleAddedNotice observer is chunked asynchronously; re-assert on the next tick.
     followUpTimer = setTimeout(() => {
+      if (!isCurrentToast()) return;
       hideGmailMessage?.();
       reshow();
     }, 50);
   };
   const check = () => {
     if (done) return;
-    const alerts = doc.querySelectorAll<HTMLElement>('[role="alert"], .b8.UC, .bAq');
-    for (const el of alerts) {
+    const gmailNotice = doc.querySelector<HTMLElement>('div.b8[role="alert"] .vh:not(.inboxsdk__butterbar)');
+    const candidates = gmailNotice ? [gmailNotice] : [...doc.querySelectorAll<HTMLElement>('[role="alert"]')];
+    for (const el of candidates) {
       if (el.closest(".inboxsdk__butterbar")) continue;
       if (/draft discarded/i.test(el.textContent ?? "")) {
         finish();
@@ -141,6 +146,18 @@ function suppressDraftDiscardedToast(
     if (followUpTimer) clearTimeout(followUpTimer);
   }, durationMs);
   check();
+}
+
+function inspectComposeAttachments(composeEl: HTMLElement | null | undefined): {
+  uploading: boolean;
+  count: number;
+} {
+  if (!composeEl) return { uploading: false, count: 0 };
+  const uploading = Boolean(composeEl.querySelector('[role="progressbar"]'));
+  const removeBtns = composeEl.querySelectorAll('[data-tooltip*="Remove attachment"], [aria-label*="Remove attachment"]');
+  if (removeBtns.length > 0) return { uploading, count: removeBtns.length };
+  const fallback = composeEl.querySelectorAll(".vI, .dL");
+  return { uploading, count: fallback.length };
 }
 
 async function main() {
@@ -167,7 +184,8 @@ async function main() {
       log("could not check connected accounts", err);
     }
   };
-  await refreshConnected();
+  // Kick off account lookup without blocking compose handler registration so cold-start sends still fail closed.
+  const initialConnected = refreshConnected();
   window.addEventListener("focus", () => void refreshConnected());
 
   const isConfirmedDisconnected = () => accountState === "disconnected";
@@ -194,13 +212,16 @@ async function main() {
     chrome.runtime.sendMessage?.({ type: "openOptions" });
   };
 
+  let toastGen = 0;
   const showButter = (opts: { text: string; time?: number; buttons?: { title: string; onClick: () => void }[] }) => {
+    toastGen++;
     sdk.ButterBar?.showMessage?.({
       text: opts.text,
       time: opts.time ?? 6000,
       priority: 100,
       buttons: opts.buttons,
     });
+    return toastGen;
   };
 
   sdk.Compose.registerComposeViewHandler((compose) => {
@@ -276,7 +297,8 @@ async function main() {
       sending = true;
       try {
         if (accountState === "unknown") {
-          await refreshConnected();
+          await initialConnected;
+          if (accountState === "unknown") await refreshConnected();
           if (accountState === "unknown") {
             throw new Error("Could not reach open-mailtrack server");
           }
@@ -289,12 +311,16 @@ async function main() {
         const from = fromContact?.emailAddress ? formatContact(fromContact) : me;
         const html = compose.getHTMLContent?.() ?? compose.getBodyElement().innerHTML;
         const subject = compose.getSubject();
-        // Only attach threadId for actual replies; on brand-new compose windows, getThreadID() is the ephemeral draft thread.
-        const threadId = compose.isReply?.() ? compose.getThreadID?.() || null : null;
+        // Only attach threadId for true replies (not brand-new drafts or inline forwards, where InboxSDK's isReply() is true).
+        const isTrueReply = Boolean(compose.isReply?.() && !(compose as { isForward?: () => boolean }).isForward?.());
+        const threadId = isTrueReply ? compose.getThreadID?.() || null : null;
         const composeEl = compose.getElement?.();
-        const hasAttachments = Boolean(
-          composeEl?.querySelector('[data-tooltip*="Remove attachment"], [aria-label*="Remove attachment"], .vI, .dL'),
-        );
+        const attState = inspectComposeAttachments(composeEl);
+        if (attState.uploading) {
+          throw new Error("Wait for attachments to finish uploading before sending");
+        }
+        const expectedAttachmentCount = attState.count;
+        const hasAttachments = expectedAttachmentCount > 0;
         const draftMessageId = compose.getInitialMessageID?.() || null;
         let draftId = (await compose.getCurrentDraftID?.().catch(() => null)) || null;
         if (hasAttachments && !draftId) {
@@ -327,6 +353,7 @@ async function main() {
           draftId,
           draftMessageId,
           hasAttachments,
+          expectedAttachmentCount,
           clientRequestId,
           sendAt: opts.sendAt,
           isScheduled: opts.isScheduled,
@@ -356,10 +383,11 @@ async function main() {
         };
 
         const initialUndoMs = res.remainingMs ?? (opts.undoDelayMs ?? 0);
+        let sendToastGen = -1;
         const showSendToast = () => {
           if (opts.isScheduled && opts.sendAt) {
             const suffix = opts.cancelOnReply ? " (cancels if they reply)" : "";
-            showButter({
+            sendToastGen = showButter({
               text: `Scheduled for ${when(opts.sendAt, Date.now())}${suffix}`,
               time: 8000,
               buttons: [
@@ -368,27 +396,36 @@ async function main() {
               ],
             });
           } else if (initialUndoMs > 0) {
-            const remaining = res.sendAt ? Math.max(1500, res.sendAt - Date.now()) : initialUndoMs;
-            showButter({
-              text: "Sending message…",
-              time: remaining,
-              buttons: [{ title: "Undo", onClick: () => void undoAction() }],
-            });
+            const remaining = res.sendAt ? res.sendAt - Date.now() : initialUndoMs;
+            if (remaining > 500) {
+              sendToastGen = showButter({
+                text: "Sending message…",
+                time: remaining,
+                buttons: [{ title: "Undo", onClick: () => void undoAction() }],
+              });
+            } else {
+              sendToastGen = showButter({ text: "Queued to send…" });
+            }
           } else {
-            showButter({ text: "Message sent" });
+            sendToastGen = showButter({ text: "Queued to send…" });
           }
         };
+
+        showSendToast();
 
         // InboxSDK's close() is a no-op for inline replies; discard() closes the inline compose cleanly.
         // Suppress Gmail's native "Draft discarded. Undo" toast so it never hides our real send status.
         if (wasInline) {
-          suppressDraftDiscardedToast(composeDoc, () => sdk.ButterBar?.hideGmailMessage?.(), showSendToast);
+          suppressDraftDiscardedToast(
+            composeDoc,
+            () => sdk.ButterBar?.hideGmailMessage?.(),
+            showSendToast,
+            () => toastGen === sendToastGen,
+          );
           compose.discard?.();
         } else {
           compose.close?.();
         }
-
-        showSendToast();
       } catch (err) {
         // Fail closed: keep compose window and draft intact so nothing is lost.
         log("tracked send failed", err);
@@ -427,7 +464,9 @@ async function main() {
       const box = doc.createElement("div");
       box.className = "omt-schedule-modal";
 
-      const isReplyThread = Boolean(compose.isReply?.() && compose.getThreadID?.());
+      const isReplyThread = Boolean(
+        compose.isReply?.() && !(compose as { isForward?: () => boolean }).isForward?.() && compose.getThreadID?.(),
+      );
       let cancelOnReplyInput: HTMLInputElement | null = null;
       if (isReplyThread) {
         const checkWrap = doc.createElement("label");
@@ -456,6 +495,10 @@ async function main() {
         timeEl.textContent = when(preset.sendAt, Date.now());
         btn.append(label, timeEl);
         btn.addEventListener("click", () => {
+          if (preset.sendAt <= Date.now()) {
+            showButter({ text: "That time has already passed. Pick a future date and time." });
+            return;
+          }
           const cancelOnReply = Boolean(cancelOnReplyInput?.checked);
           modal?.close();
           void dispatchViaOutbox({ sendAt: preset.sendAt, isScheduled: true, cancelOnReply });

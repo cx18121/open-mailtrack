@@ -335,4 +335,55 @@ describe("conditional schedule send", () => {
     expect(mocks.showMessage.mock.calls.length).toBeGreaterThan(initialCalls);
     expect(mocks.showMessage.mock.calls.at(-1)?.[0]).toMatchObject({ text: "Sending message…" });
   });
+
+  it("blocks sending while attachments are still uploading and does not treat inline forwards as replies", async () => {
+    await boot(true);
+    let capturedModal: { el: HTMLElement } | null = null;
+    mocks.showModalView.mockImplementation((opts) => {
+      capturedModal = opts;
+      return { close: vi.fn() };
+    });
+
+    const events: Record<string, (...args: any[]) => any> = {};
+    const composeEl = document.createElement("div");
+    const progress = document.createElement("div");
+    progress.setAttribute("role", "progressbar");
+    composeEl.append(progress);
+    const body = document.createElement("div");
+    body.innerHTML = "<p>Forwarding</p>";
+
+    mocks.composeHandler.mock.calls[0][0]({
+      addButton: vi.fn(),
+      addComposeNotice: vi.fn(() => ({ el: document.createElement("div") })),
+      on: (name: string, fn: (...args: any[]) => any) => {
+        events[name] = fn;
+      },
+      getToRecipients: () => [{ emailAddress: "ana@example.com" }],
+      getCcRecipients: () => [],
+      getBccRecipients: () => [],
+      getFromContact: () => ({ name: "Charlie", emailAddress: "me@cornell.edu" }),
+      getBodyElement: () => body,
+      getElement: () => composeEl,
+      getHTMLContent: () => body.innerHTML,
+      getSubject: () => "Fwd: Deck",
+      isReply: () => true,
+      isForward: () => true,
+      getThreadID: () => "gt1",
+      getCurrentDraftID: async () => "draft-123",
+      getInitialMessageID: () => "dmsg-orig",
+      close: vi.fn(),
+    });
+
+    // Inline forward must NOT show Cancel automatically if they reply
+    events.scheduleSendMenuOpening({ cancel: vi.fn() });
+    expect(capturedModal!.el.querySelector(".omt-schedule-check")).toBeNull();
+
+    // Active upload progress bar must fail closed without enqueuing
+    events.presending({ cancel: vi.fn() });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.enqueueOutbox).not.toHaveBeenCalled();
+    expect(mocks.showMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ text: expect.stringContaining("Wait for attachments to finish uploading") }),
+    );
+  });
 });

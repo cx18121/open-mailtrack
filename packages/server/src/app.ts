@@ -568,7 +568,12 @@ export function createApp(db: Db, config: Config) {
         (body.threadId !== undefined && body.threadId !== null && typeof body.threadId !== "string") ||
         (body.draftId !== undefined && body.draftId !== null && typeof body.draftId !== "string") ||
         (body.draftMessageId !== undefined && body.draftMessageId !== null && typeof body.draftMessageId !== "string") ||
-        (body.cancelOnReply !== undefined && typeof body.cancelOnReply !== "boolean")
+        (body.cancelOnReply !== undefined && typeof body.cancelOnReply !== "boolean") ||
+        (body.allowDuplicate !== undefined && typeof body.allowDuplicate !== "boolean") ||
+        (body.expectedAttachmentCount !== undefined &&
+          (typeof body.expectedAttachmentCount !== "number" ||
+            !Number.isInteger(body.expectedAttachmentCount) ||
+            body.expectedAttachmentCount < 0))
       ) {
         return c.json({ error: "invalid outbox payload" }, 400);
       }

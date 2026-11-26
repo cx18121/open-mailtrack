@@ -1,4 +1,4 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import type { Cipher } from "./crypto.js";
 import type { Account, Db, OutboxItem, RecipientKind } from "./db.js";
 import {
@@ -10,15 +10,38 @@ import {
 } from "./mailbox.js";
 import {
   compileMime,
+  countGmailDraftInlineImages,
+  extractDataUriImages,
   extractEmailAddress,
   injectPixelIntoHtml,
   parseDraftMime,
+  rewriteGmailDraftInlineImages,
   stripServerPixelsFromHtml,
   type MimeAttachment,
 } from "./mime.js";
 
 export const MAX_GROUP_RECIPIENTS = 25;
+export const DUPLICATE_WINDOW_MS = 120_000;
 export const newTokenId = () => randomBytes(16).toString("base64url");
+
+function computeContentHash(args: {
+  senderEmail: string;
+  recipients: string[];
+  subject: string;
+  html: string;
+  attachments: MimeAttachment[];
+}): string {
+  const h = createHash("sha256");
+  const normalized = JSON.stringify({
+    s: args.senderEmail.toLowerCase(),
+    r: [...args.recipients].map((x) => x.toLowerCase()).sort(),
+    sub: args.subject.trim(),
+    html: args.html.trim(),
+    att: args.attachments.map((a) => `${a.filename ?? ""}:${a.contentType}:${a.contentBase64.length}`).sort(),
+  });
+  h.update(normalized);
+  return h.digest("base64url");
+}
 
 export class OutboxError extends Error {
   readonly status: number;
@@ -56,6 +79,8 @@ export type EnqueueRequest = {
   draftId?: string | null;
   draftMessageId?: string | null;
   hasAttachments?: boolean;
+  expectedAttachmentCount?: number;
+  allowDuplicate?: boolean;
   clientRequestId?: string;
   inReplyTo?: string;
   references?: string;
@@ -167,8 +192,10 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       if (item.cancel_on_reply && item.thread_id && !anyAlreadySent) {
         let repliedAt: number | null = null;
         let repliedBy: string[] = [];
+        const aliasEmail = extractEmailAddress(payload.from);
+        const extraSelf = aliasEmail && aliasEmail !== senderEmail ? [aliasEmail] : [];
         if (transport.inspectThreadActivity) {
-          const activity = await transport.inspectThreadActivity(item.thread_id, item.created_at, senderEmail);
+          const activity = await transport.inspectThreadActivity(item.thread_id, item.created_at, senderEmail, extraSelf);
           repliedAt = activity.repliedAt;
           repliedBy = activity.repliedBy.map((r) => r.email);
         } else if (transport.getThreadReplyAt) {
@@ -321,6 +348,14 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         throw new OutboxError(400, "Valid sender email address is required");
       }
 
+      const nowCheck = Date.now();
+      if (req.sync && req.sendAt !== undefined && req.sendAt > nowCheck + 5_000) {
+        throw new OutboxError(400, "Cannot use sync dispatch with a future sendAt timestamp");
+      }
+      if (req.isScheduled && req.sendAt !== undefined && req.sendAt < nowCheck - 5_000) {
+        throw new OutboxError(400, "Scheduled send time must be in the future");
+      }
+
       // Idempotency guard for retries after a lost HTTP response.
       if (req.clientRequestId) {
         const existing = db.getOutboxByClientRequestId(senderEmail, req.clientRequestId);
@@ -340,9 +375,9 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         throw new OutboxError(412, `Account ${senderEmail} is not connected. Connect it in open-mailtrack options first.`);
       }
 
-      const to = (req.to ?? []).filter(Boolean);
-      const cc = (req.cc ?? []).filter(Boolean);
-      const bcc = (req.bcc ?? []).filter(Boolean);
+      const to = (req.to ?? []).map((x) => x.trim()).filter(Boolean);
+      const cc = (req.cc ?? []).map((x) => x.trim()).filter(Boolean);
+      const bcc = (req.bcc ?? []).map((x) => x.trim()).filter(Boolean);
 
       const seen = new Set<string>();
       const tracked: { email: string; kind: RecipientKind }[] = [];
@@ -351,7 +386,9 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       const addList = (list: string[], kind: RecipientKind) => {
         for (const entry of list) {
           const email = extractEmailAddress(entry);
-          if (!email) continue;
+          if (!email) {
+            throw new OutboxError(400, `Invalid recipient email address: "${entry}"`);
+          }
           if (email === senderEmail) {
             includeSelfDelivery = true;
             continue;
@@ -381,10 +418,23 @@ export function createOutboxService(opts: OutboxServiceOptions) {
       let inReplyTo = req.inReplyTo;
       let references = req.references;
       let threadId = req.threadId ?? null;
+      let resolvedSubject = req.subject;
+      let html = stripServerPixelsFromHtml(req.html, publicUrl);
+
+      const expectedFileAttachments =
+        req.expectedAttachmentCount !== undefined
+          ? Math.max(0, Math.floor(req.expectedAttachmentCount))
+          : req.hasAttachments
+            ? 1
+            : undefined;
+      const expectedInlineImages = countGmailDraftInlineImages(html);
+      const needsDraftMedia =
+        (expectedFileAttachments !== undefined && expectedFileAttachments > 0 && attachments.length === 0) ||
+        expectedInlineImages > 0;
 
       if (req.draftId || req.draftMessageId) {
         try {
-          const attempts = req.hasAttachments && attachments.length === 0 ? [0, 600, 1200, 1800] : [0];
+          const attempts = needsDraftMedia ? [0, 600, 1200, 1800] : [0];
           let draft: { raw: Buffer; threadId?: string } | null = null;
           let parsed: Awaited<ReturnType<typeof parseDraftMime>> | null = null;
           for (const waitMs of attempts) {
@@ -392,39 +442,80 @@ export function createOutboxService(opts: OutboxServiceOptions) {
             draft = await transport.getDraftRaw(req.draftId, req.draftMessageId);
             if (!draft) continue;
             parsed = await parseDraftMime(draft.raw);
-            if (!req.hasAttachments || parsed.attachments.length > 0) break;
+            const fileAtts = parsed.attachments.filter((a) => a.disposition !== "inline");
+            const inlineAtts = parsed.attachments.filter((a) => a.disposition === "inline" && a.cid);
+            const filesReady =
+              expectedFileAttachments === undefined ||
+              expectedFileAttachments === 0 ||
+              fileAtts.length >= expectedFileAttachments;
+            const inlineReady = inlineAtts.length >= expectedInlineImages;
+            if (filesReady && inlineReady) break;
           }
           if (draft && parsed) {
-            if (attachments.length === 0 && parsed.attachments.length > 0) {
-              attachments = parsed.attachments;
+            const fileAtts = parsed.attachments.filter((a) => a.disposition !== "inline");
+            const inlineAtts = parsed.attachments.filter((a) => a.disposition === "inline" && a.cid);
+            if (attachments.length === 0) {
+              if (expectedFileAttachments === 0) {
+                // Browser explicitly has 0 file attachments; only pull inline CID images if referenced.
+                attachments = expectedInlineImages > 0 ? [...inlineAtts] : [];
+              } else {
+                attachments = [...fileAtts, ...inlineAtts];
+              }
+            } else if (expectedInlineImages > 0) {
+              attachments = [...attachments, ...inlineAtts];
             }
             inReplyTo ??= parsed.inReplyTo;
             references ??= parsed.references;
+            if (!resolvedSubject.trim() && parsed.subject?.trim()) {
+              resolvedSubject = parsed.subject.trim();
+            }
             if (parsed.inReplyTo) threadId ??= draft.threadId ?? null;
           }
-          if (req.hasAttachments && attachments.length === 0) {
+          const resolvedFileCount = attachments.filter((a) => a.disposition !== "inline").length;
+          if (expectedFileAttachments !== undefined && expectedFileAttachments > 0 && resolvedFileCount < expectedFileAttachments) {
             throw new OutboxError(
               502,
-              "Could not read draft attachments from Gmail yet; wait a second for Gmail to finish saving the draft and retry.",
+              `Could not read all ${expectedFileAttachments} draft attachment(s) from Gmail yet (found ${resolvedFileCount}); wait a second for Gmail to finish saving the draft and retry.`,
             );
           }
         } catch (err) {
           if (err instanceof OutboxError) throw err;
           throw new OutboxError(502, `Could not read Gmail draft attachments: ${(err as Error).message}`);
         }
-      } else if (req.hasAttachments && attachments.length === 0) {
+      } else if (expectedFileAttachments !== undefined && expectedFileAttachments > 0 && attachments.length === 0) {
         throw new OutboxError(
           502,
           "Draft has attachments that Gmail has not saved yet; wait a second for Gmail to save the draft and retry.",
         );
       }
 
-      if (threadId && !inReplyTo) {
+      if (expectedInlineImages > 0) {
+        const inlineRewritten = rewriteGmailDraftInlineImages(html, attachments);
+        if (inlineRewritten.unresolved > 0) {
+          throw new OutboxError(
+            502,
+            "Draft contains inline images that Gmail has not finished saving yet; wait a second and retry.",
+          );
+        }
+        html = inlineRewritten.html;
+      }
+
+      const dataImgResult = extractDataUriImages(html);
+      if (dataImgResult.inlineAttachments.length > 0) {
+        html = dataImgResult.html;
+        attachments = [...attachments, ...dataImgResult.inlineAttachments];
+      }
+
+      if (threadId && (!inReplyTo || !resolvedSubject.trim())) {
         try {
           const replyHeaders = await transport.getThreadReplyHeaders(threadId);
           if (replyHeaders) {
-            inReplyTo = replyHeaders.inReplyTo;
-            references = replyHeaders.references;
+            inReplyTo ??= replyHeaders.inReplyTo;
+            references ??= replyHeaders.references;
+            if (!resolvedSubject.trim() && replyHeaders.subject?.trim()) {
+              const baseSubj = replyHeaders.subject.trim();
+              resolvedSubject = /^re:/i.test(baseSubj) ? baseSubj : `Re: ${baseSubj}`;
+            }
           }
         } catch (err) {
           throw new OutboxError(502, `Could not fetch thread headers for reply: ${(err as Error).message}`);
@@ -435,14 +526,32 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         throw new OutboxError(400, "cancelOnReply requires replying inside an existing Gmail thread");
       }
 
-      const cleanHtml = stripServerPixelsFromHtml(req.html, publicUrl);
+      const contentHash = computeContentHash({
+        senderEmail,
+        recipients: tracked.map((r) => r.email),
+        subject: resolvedSubject,
+        html,
+        attachments,
+      });
+      if (!req.allowDuplicate) {
+        const dup = db.findRecentOutboxByContentHash(senderEmail, contentHash, Date.now() - DUPLICATE_WINDOW_MS);
+        if (dup) {
+          throw new OutboxError(
+            409,
+            "An identical email to these recipients was already queued or sent moments ago.",
+          );
+        }
+      }
+
+      const cleanHtml = html;
       const from = req.from || (account.display_name ? `${account.display_name} <${senderEmail}>` : senderEmail);
       const messageId = newTokenId();
       const outboxId = newTokenId();
-      // Compute sendAt AFTER draft snapshot so the Undo window starts when the HTTP response returns.
+      // Give a small buffer while deleteDraft runs if using an Undo delay, then set exact sendAt after cleanup.
       const now = Date.now();
       const isScheduled = Boolean(req.isScheduled || (req.sendAt !== undefined && req.sendAt > now + 60_000));
-      const sendAt = req.sendAt ?? (now + Math.max(0, req.undoDelayMs ?? 0));
+      const undoDelayMs = Math.max(0, req.undoDelayMs ?? 0);
+      const initialSendAt = req.sendAt ?? (undoDelayMs > 0 ? now + undoDelayMs + 5_000 : now);
 
       const recipientTokens = tracked.map((r) => ({
         token: newTokenId(),
@@ -456,7 +565,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         to,
         cc,
         bcc,
-        subject: req.subject,
+        subject: resolvedSubject,
         html: cleanHtml,
         text: req.text,
         inReplyTo,
@@ -472,7 +581,7 @@ export function createOutboxService(opts: OutboxServiceOptions) {
           id: messageId,
           sender: senderEmail,
           recipients: tracked.map((r) => r.email),
-          subject: req.subject,
+          subject: resolvedSubject,
           source,
           tracking_mode: "per_recipient",
         },
@@ -482,10 +591,11 @@ export function createOutboxService(opts: OutboxServiceOptions) {
           account_email: senderEmail,
           message_id: messageId,
           client_request_id: req.clientRequestId ?? null,
-          send_at: sendAt,
+          content_hash: contentHash,
+          send_at: initialSendAt,
           is_scheduled: isScheduled,
           cancel_on_reply: Boolean(req.cancelOnReply),
-          subject: req.subject,
+          subject: resolvedSubject,
           recipients: { to, cc, bcc },
           thread_id: threadId,
           draft_id: req.draftId ?? req.draftMessageId ?? null,
@@ -497,6 +607,13 @@ export function createOutboxService(opts: OutboxServiceOptions) {
         await transport.deleteDraft(req.draftId, req.draftMessageId).catch((err) => {
           console.error(`[open-mailtrack] non-fatal draft cleanup failed:`, err);
         });
+      }
+
+      // Now that draft cleanup is done, set the exact Undo deadline so cleanup latency never eats the Undo window.
+      let sendAt = initialSendAt;
+      if (req.sendAt === undefined && undoDelayMs > 0) {
+        sendAt = Date.now() + undoDelayMs;
+        db.rescheduleOutbox(outboxId, sendAt);
       }
 
       if (req.sync) {
@@ -597,8 +714,14 @@ export function createOutboxService(opts: OutboxServiceOptions) {
           draftMessageId = restored.messageId || null;
         }
       } catch (err) {
-        // Restore previous status with encrypted snapshot completely intact!
-        db.abortCancelOutbox(outboxId, locked.previousStatus);
+        // Never re-arm `queued` after a user explicitly clicked Undo: park in `failed` with the
+        // encrypted snapshot intact so the message cannot auto-send and draft restore can be retried.
+        const msg = err instanceof Error ? err.message : String(err);
+        db.abortCancelOutbox(
+          outboxId,
+          "failed",
+          `Send paused after Undo; draft restore failed (${msg}). Retry Cancel & restore draft in Tracked → Scheduled.`,
+        );
         throw err;
       }
 
